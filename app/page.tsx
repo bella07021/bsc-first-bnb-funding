@@ -6,6 +6,7 @@ import {
   ArrowUpRight,
   CheckCircle2,
   Database,
+  Download,
   Search,
   ShieldCheck,
   Trash2,
@@ -35,6 +36,7 @@ import {
   TableRow,
 } from '@/components/ui/table';
 import { Textarea } from '@/components/ui/textarea';
+import { buildArrivalGroupMap } from '@/lib/arrival-groups';
 
 type OkResult = {
   address: string;
@@ -91,7 +93,12 @@ function formatWei(value: string) {
   const base = 10n ** 18n;
   const whole = wei / base;
   const fraction = (wei % base).toString().padStart(18, '0').replace(/0+$/, '');
-  return fraction ? `${whole}.${fraction} BNB` : `${whole} BNB`;
+  const amount = fraction ? `${whole}.${fraction}` : `${whole}`;
+  return `${amount} BNB`;
+}
+
+function formatWeiForExport(value: string) {
+  return formatWei(value).replace(/ BNB$/, '');
 }
 
 function formatTimestamp(timestamp: number) {
@@ -136,12 +143,27 @@ export default function Home() {
   const [error, setError] = useState('');
   const [complete, setComplete] = useState(true);
   const [progress, setProgress] = useState<LookupProgress>(emptyProgress);
+  const [exporting, setExporting] = useState(false);
+  const [exportError, setExportError] = useState('');
 
   const addresses = useMemo(() => extractAddresses(input), [input]);
   const tooMany = addresses.length > maxAddresses;
   const progressPercent = progress.total
     ? Math.round((progress.processed / progress.total) * 100)
     : 0;
+  const arrivalGroups = useMemo(
+    () =>
+      buildArrivalGroupMap(
+        results
+          .filter((result): result is OkResult => result.status === 'ok')
+          .map((result) => ({
+            address: result.address,
+            timestamp: result.timestamp,
+            cexExchange: result.cex?.exchange ?? null,
+          })),
+      ),
+    [results],
+  );
 
   async function runLookup() {
     if (addresses.length === 0 || tooMany || loading) return;
@@ -149,6 +171,7 @@ export default function Home() {
     const totalBatches = Math.ceil(queryAddresses.length / batchSize);
     setLoading(true);
     setError('');
+    setExportError('');
     setResults([]);
     setComplete(true);
     setProgress({
@@ -220,6 +243,7 @@ export default function Home() {
     setInput(value);
     setResults([]);
     setError('');
+    setExportError('');
     setComplete(true);
     setProgress(emptyProgress);
   }
@@ -228,8 +252,111 @@ export default function Home() {
     setInput('');
     setResults([]);
     setError('');
+    setExportError('');
     setComplete(true);
     setProgress(emptyProgress);
+  }
+
+  async function exportExcel() {
+    if (loading || exporting || results.length === 0) return;
+    setExporting(true);
+    setExportError('');
+
+    try {
+      const { default: writeExcelFile } = await import('write-excel-file/browser');
+      const header = (value: string) => ({
+        value,
+        fontWeight: 'bold' as const,
+        backgroundColor: '#F3BA2F',
+        textColor: '#152038',
+        align: 'center' as const,
+        alignVertical: 'center' as const,
+      });
+      const sheetData = [
+        [
+          header('序号'),
+          header('地址'),
+          header('查询状态'),
+          header('到账时间（UTC+8）'),
+          header('到账时间分组'),
+          header('BNB 金额（精确值）'),
+          header('来源 CEX'),
+          header('来源地址'),
+          header('交易哈希'),
+          header('备注'),
+        ],
+        ...results.map((result, index) => {
+          if (result.status === 'ok') {
+            const groupNumber = arrivalGroups.get(result.address);
+            return [
+              index + 1,
+              result.address,
+              '成功',
+              {
+                value: new Date((result.timestamp + 8 * 60 * 60) * 1000),
+                type: Date,
+                format: 'yyyy-mm-dd hh:mm:ss',
+              },
+              groupNumber
+                ? { value: `组别 ${groupNumber}`, backgroundColor: '#FFF4CC', fontWeight: 'bold' as const }
+                : '无',
+              formatWeiForExport(result.amountWei),
+              result.cex?.label ?? '未识别',
+              result.sourceAddress,
+              result.transactionHash,
+              '',
+            ];
+          }
+
+          const statusLabel = {
+            no_inbound: '无普通入账',
+            contract: '非普通 EOA',
+            error: '查询失败',
+          }[result.status];
+          return [
+            index + 1,
+            result.address,
+            statusLabel,
+            null,
+            '无',
+            null,
+            null,
+            null,
+            null,
+            result.message,
+          ];
+        }),
+      ];
+      const timestamp = formatTimestamp(Math.floor(Date.now() / 1000)).replace(/\D/g, '').slice(0, 14);
+
+      await writeExcelFile(
+        sheetData,
+        {
+          sheet: '查询结果',
+          columns: [
+            { width: 8 },
+            { width: 44 },
+            { width: 16 },
+            { width: 23 },
+            { width: 18 },
+            { width: 24 },
+            { width: 24 },
+            { width: 44 },
+            { width: 68 },
+            { width: 42 },
+          ],
+          stickyRowsCount: 1,
+          stickyColumnsCount: 2,
+          orientation: 'landscape',
+          zoomScale: 0.85,
+        },
+        { fontFamily: 'Aptos', fontSize: 11 },
+      ).toFile(`首笔原生BNB到账时间-${timestamp}.xlsx`);
+    } catch (cause) {
+      setExportError(cause instanceof Error ? cause.message : '生成 Excel 文件失败');
+    } finally {
+      setExporting(false);
+    }
   }
 
   return (
@@ -349,6 +476,14 @@ export default function Home() {
               </Alert>
             )}
 
+            {exportError && (
+              <Alert variant="destructive" className="border-destructive/25 bg-red-50/70 px-4 py-3">
+                <AlertCircle />
+                <AlertTitle>Excel 导出失败</AlertTitle>
+                <AlertDescription>{exportError}</AlertDescription>
+              </Alert>
+            )}
+
             {results.length > 0 && !complete && (
               <Alert className="border-amber-300 bg-amber-50 px-4 py-3 text-amber-900">
                 <AlertCircle />
@@ -364,12 +499,23 @@ export default function Home() {
                     <CardTitle>查询结果</CardTitle>
                     <CardDescription className="mt-1">时间统一显示为北京时间（UTC+8）</CardDescription>
                   </div>
-                  {results.length > 0 && (
-                    <Badge variant={complete ? 'secondary' : 'outline'}>
-                      {complete ? <CheckCircle2 className="size-3" /> : <AlertCircle className="size-3" />}
-                      {results.length} 个地址
-                    </Badge>
-                  )}
+                  <div className="flex items-center gap-2">
+                    {results.length > 0 && (
+                      <Badge variant={complete ? 'secondary' : 'outline'}>
+                        {complete ? <CheckCircle2 className="size-3" /> : <AlertCircle className="size-3" />}
+                        {results.length} 个地址
+                      </Badge>
+                    )}
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={exportExcel}
+                      disabled={loading || exporting || results.length === 0}
+                    >
+                      {exporting ? <Spinner /> : <Download data-icon="inline-start" />}
+                      {exporting ? '导出中' : '导出 Excel'}
+                    </Button>
+                  </div>
                 </div>
               </CardHeader>
               <CardContent className="px-0 pb-0">
@@ -387,6 +533,7 @@ export default function Home() {
                       <TableRow className="bg-secondary/45 hover:bg-secondary/45">
                         <TableHead className="pl-4">地址</TableHead>
                         <TableHead>到账时间</TableHead>
+                        <TableHead>到账时间分组</TableHead>
                         <TableHead>BNB 金额</TableHead>
                         <TableHead>来源 CEX</TableHead>
                         <TableHead className="pr-4">交易哈希</TableHead>
@@ -401,6 +548,17 @@ export default function Home() {
                           {result.status === 'ok' ? (
                             <>
                               <TableCell>{formatTimestamp(result.timestamp)}</TableCell>
+                              <TableCell>
+                                {loading ? (
+                                  <Badge variant="outline">计算中</Badge>
+                                ) : arrivalGroups.has(result.address) ? (
+                                  <Badge className="bg-primary/15 text-primary">
+                                    组别 {arrivalGroups.get(result.address)}
+                                  </Badge>
+                                ) : (
+                                  <span className="text-sm text-muted-foreground">无</span>
+                                )}
+                              </TableCell>
                               <TableCell className="font-medium">{formatWei(result.amountWei)}</TableCell>
                               <TableCell>
                                 {result.cex ? (
@@ -425,7 +583,7 @@ export default function Home() {
                               </TableCell>
                             </>
                           ) : (
-                            <TableCell colSpan={4} className="pr-4">
+                            <TableCell colSpan={5} className="pr-4">
                               <StatusMessage result={result} />
                             </TableCell>
                           )}
@@ -440,7 +598,7 @@ export default function Home() {
         </section>
 
         <footer className="mt-12 border-t border-border pt-5 text-xs leading-5 text-muted-foreground">
-          “首笔原生 BNB 到账”指最早一笔成功、金额大于 0 的普通链上交易；不包含内部交易。CEX 标签采用精确地址匹配，未命中不代表一定不是交易所地址。
+          “首笔原生 BNB 到账”指最早一笔成功、金额大于 0 的普通链上交易；不包含内部交易。到账时间分组要求来源为同一家已识别 CEX、相邻到账严格小于 20 分钟且连续至少 5 个地址。CEX 标签采用精确地址匹配，未命中不代表一定不是交易所地址。
         </footer>
       </div>
     </main>
