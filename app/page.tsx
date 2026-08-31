@@ -373,8 +373,8 @@ export default function Home() {
 
   return (
     <main className="min-h-screen bg-background text-foreground">
-      <div className="mx-auto w-full max-w-[1180px] px-5 py-6 sm:px-8 lg:py-10">
-        <header className="mb-10 flex items-center justify-between">
+      <div className="mx-auto w-full max-w-[1580px] px-5 py-6 sm:px-8 lg:py-10">
+        <header className="mb-8 flex items-center justify-between">
           <div className="flex items-center gap-3">
             <div className="grid size-10 place-items-center rounded-xl bg-primary text-primary-foreground shadow-[0_8px_24px_rgba(240,185,11,0.18)]">
               <Database className="size-5" />
@@ -391,8 +391,8 @@ export default function Home() {
           </Badge>
         </header>
 
-        <section className="grid items-start gap-7 lg:grid-cols-[minmax(0,0.95fr)_minmax(480px,1.35fr)]">
-          <div className="pt-2 lg:sticky lg:top-10">
+        <section className="mb-8">
+          <div className="pt-2">
             <div className="mb-5 inline-flex items-center gap-2 rounded-full border border-border bg-card px-3 py-1.5 text-xs text-muted-foreground shadow-sm">
               <ShieldCheck className="size-3.5 text-primary" />
               仅查询普通原生 BNB 入账，不含内部交易
@@ -418,21 +418,23 @@ export default function Home() {
               ))}
             </div>
           </div>
+        </section>
 
-          <div className="space-y-5">
-            <Card className="border border-border bg-card shadow-[0_24px_80px_rgba(10,18,35,0.08)] ring-0">
+        <section className="grid items-start gap-5 lg:grid-cols-[minmax(320px,0.72fr)_minmax(0,1.65fr)]">
+          <div className="min-w-0 space-y-5">
+            <Card className="h-[36rem] border border-border bg-card shadow-[0_24px_80px_rgba(10,18,35,0.08)] ring-0 lg:h-[calc(100vh-8rem)] lg:min-h-[36rem] lg:max-h-[48rem]">
               <CardHeader className="border-b border-border pb-4">
                 <CardTitle className="text-lg">输入地址</CardTitle>
                 <CardDescription>每行一个地址，也支持从文本中自动提取。最多 {maxAddresses} 个。</CardDescription>
               </CardHeader>
-              <CardContent className="space-y-4 pt-1">
+              <CardContent className="flex min-h-0 flex-1 flex-col gap-4 pt-1">
                 <Textarea
                   value={input}
                   onChange={(event) => updateInput(event.target.value)}
                   aria-label="BSC EOA 地址列表"
                   aria-invalid={tooMany}
                   disabled={loading}
-                  className="min-h-44 resize-y border-border bg-secondary/45 p-4 font-mono text-sm leading-6 focus-visible:border-primary focus-visible:ring-primary/20"
+                  className="min-h-0 flex-1 resize-none overflow-y-auto overscroll-contain border-border bg-secondary/45 p-4 font-mono text-sm leading-6 [field-sizing:fixed] focus-visible:border-primary focus-visible:ring-primary/20"
                   placeholder={'0x1234...\n0xabcd...'}
                   spellCheck={false}
                 />
@@ -503,8 +505,9 @@ export default function Home() {
                 <AlertDescription>失败项不会被当作“无普通入账”，请稍后重试。</AlertDescription>
               </Alert>
             )}
+          </div>
 
-            <Card className="border border-border bg-card ring-0">
+          <Card className="h-[36rem] min-w-0 border border-border bg-card ring-0 lg:h-[calc(100vh-8rem)] lg:min-h-[36rem] lg:max-h-[48rem]">
               <CardHeader className="border-b border-border pb-4">
                 <div className="flex items-center justify-between gap-3">
                   <div>
@@ -530,9 +533,15 @@ export default function Home() {
                   </div>
                 </div>
               </CardHeader>
-              <CardContent className="px-0 pb-0">
+            <CardContent className="min-h-0 flex-1 px-0 pb-0">
+              <div
+                className="h-full overflow-auto overscroll-contain [&_[data-slot=table-container]]:overflow-visible"
+                role="region"
+                aria-label="查询结果数据"
+                tabIndex={0}
+              >
                 {results.length === 0 ? (
-                  <div className="grid min-h-44 place-items-center px-6 text-center">
+                  <div className="grid h-full min-h-44 place-items-center px-6 text-center">
                     <div>
                       <Search className="mx-auto mb-3 size-6 text-muted-foreground/50" />
                       <p className="text-sm font-medium">等待查询</p>
@@ -540,8 +549,8 @@ export default function Home() {
                     </div>
                   </div>
                 ) : (
-                  <Table>
-                    <TableHeader>
+                  <Table className="min-w-[1100px]">
+                    <TableHeader className="sticky top-0 z-10 bg-card shadow-[0_1px_0_0_var(--border)]">
                       <TableRow className="bg-secondary/45 hover:bg-secondary/45">
                         <TableHead className="pl-4">序号</TableHead>
                         <TableHead>地址</TableHead>
@@ -615,9 +624,9 @@ export default function Home() {
                     </TableBody>
                   </Table>
                 )}
-              </CardContent>
-            </Card>
-          </div>
+              </div>
+            </CardContent>
+          </Card>
         </section>
 
         <footer className="mt-12 border-t border-border pt-5 text-xs leading-5 text-muted-foreground">
