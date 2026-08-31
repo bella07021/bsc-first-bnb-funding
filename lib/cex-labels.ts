@@ -54,9 +54,17 @@ const labels: Record<string, CexLabel> = {
     exchange: 'OKX',
     label: 'OKX: Hot Wallet',
   },
+  '0x97b9d2102a9a65a26e1ee82d59e42d1b73b68689': {
+    exchange: 'Bitget',
+    label: 'Bitget 3',
+  },
   '0x149ded7438caf5e5bfdc507a6c25436214d445e1': {
     exchange: 'Bitget',
     label: 'Bitget: Hot Wallet 4',
+  },
+  '0x635308e731a878741bfec299e67f5fd28c7553d9': {
+    exchange: 'KuCoin',
+    label: 'KuCoin 28',
   },
   '0xb0e5ec2a0bb8b8f3a727787f90b959611e4062b7': {
     exchange: 'LBank',
