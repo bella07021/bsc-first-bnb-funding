@@ -58,6 +58,10 @@ const labels: Record<string, CexLabel> = {
     exchange: 'Bitget',
     label: 'Bitget: Hot Wallet 4',
   },
+  '0xb0e5ec2a0bb8b8f3a727787f90b959611e4062b7': {
+    exchange: 'LBank',
+    label: 'LBank: Hot Wallet 9',
+  },
 };
 
 export function getCexLabel(address: string): CexLabel | null {
