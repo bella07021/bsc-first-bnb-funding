@@ -1,11 +1,15 @@
 import { getCexLabel } from '@/lib/cex-labels';
 
 export const runtime = 'nodejs';
+export const maxDuration = 120;
 
 const ADDRESS_PATTERN = /^0x[a-fA-F0-9]{40}$/;
-const MAX_ADDRESSES = 100;
+const MAX_ADDRESSES = 20;
 const BSC_RPC_URL = 'https://bsc-dataseed.bnbchain.org';
 const HYPERSYNC_URL = 'https://bsc.hypersync.xyz/query';
+const FALLBACK_LOOKUP_URL =
+  process.env.LOOKUP_PROXY_URL?.trim() ||
+  'https://bnb-address-transfer-checker.pages.dev/api/check-address';
 
 type HyperTransaction = {
   block_number: number | string;
@@ -29,6 +33,25 @@ type HyperResponse = {
     blocks?: HyperBlock[];
     transactions?: HyperTransaction[];
   };
+};
+
+type ProxyTransfer = {
+  hash: string;
+  timestamp: number;
+  from: string;
+  to: string;
+  wei: string;
+  fromLabel?: string | null;
+  fromIsExchange?: boolean;
+};
+
+type ProxyResponse = {
+  result?: {
+    complete?: boolean;
+    failures?: Array<{ error?: string }>;
+    transfers?: ProxyTransfer[];
+  };
+  error?: string;
 };
 
 type LookupResult =
@@ -197,6 +220,89 @@ async function lookupFirstInbound(addresses: string[], token: string) {
   return { found, unresolved };
 }
 
+function cexFromProxy(sourceAddress: string, transfer: ProxyTransfer) {
+  const exact = getCexLabel(sourceAddress);
+  if (exact) return exact;
+
+  const label = transfer.fromLabel?.trim();
+  if (!label || !transfer.fromIsExchange) return null;
+  const exchange = label.match(/^(Binance|MEXC|Gate\.io|Bybit|OKX|Bitget|KuCoin|Crypto\.com|Huobi|HTX|BitMart|CoinDCX|MaskEX|CoinField|IndoEx|FixedFloat|Azbit)/i)?.[1];
+  return exchange ? { exchange, label } : null;
+}
+
+async function lookupOneViaProxy(address: string): Promise<LookupResult> {
+  const response = await fetchWithTimeout(
+    FALLBACK_LOOKUP_URL,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ addressText: address, targetIndex: 0 }),
+    },
+    70_000,
+  );
+
+  const payload = (await response.json()) as ProxyResponse;
+  if (!response.ok || !payload.result) {
+    throw new Error(payload.error || `备用历史数据源 HTTP ${response.status}`);
+  }
+  if (payload.result.complete !== true) {
+    throw new Error(payload.result.failures?.[0]?.error || '备用历史数据源覆盖不完整');
+  }
+
+  const incoming = (payload.result.transfers ?? []).find((transfer) => {
+    try {
+      return transfer.to.toLowerCase() === address && BigInt(transfer.wei) > 0n;
+    } catch {
+      return false;
+    }
+  });
+
+  if (!incoming) {
+    return {
+      address,
+      status: 'no_inbound',
+      message: '未找到成功且金额大于 0 的普通 BNB 入账',
+    };
+  }
+
+  const sourceAddress = incoming.from.toLowerCase();
+  return {
+    address,
+    status: 'ok',
+    timestamp: Number(incoming.timestamp),
+    amountWei: BigInt(incoming.wei).toString(),
+    transactionHash: incoming.hash,
+    sourceAddress,
+    cex: cexFromProxy(sourceAddress, incoming),
+  };
+}
+
+async function lookupViaProxy(addresses: string[]) {
+  const results = new Map<string, LookupResult>();
+  let cursor = 0;
+  const workerCount = Math.min(4, addresses.length);
+
+  await Promise.all(
+    Array.from({ length: workerCount }, async () => {
+      while (cursor < addresses.length) {
+        const address = addresses[cursor];
+        cursor += 1;
+        try {
+          results.set(address, await lookupOneViaProxy(address));
+        } catch (error) {
+          results.set(address, {
+            address,
+            status: 'error',
+            message: error instanceof Error ? error.message : String(error),
+          });
+        }
+      }
+    }),
+  );
+
+  return results;
+}
+
 export async function POST(request: Request) {
   let body: unknown;
   try {
@@ -213,15 +319,6 @@ export async function POST(request: Request) {
   }
 
   const token = process.env.ENVIO_API_TOKEN?.trim();
-  if (!token) {
-    return json(
-      {
-        error: '历史数据源尚未配置',
-        code: 'DATA_SOURCE_NOT_CONFIGURED',
-      },
-      503,
-    );
-  }
 
   let classifications: Awaited<ReturnType<typeof classifyAddresses>>;
   try {
@@ -250,17 +347,22 @@ export async function POST(request: Request) {
   }
 
   if (eoaAddresses.length > 0) {
-    try {
-      const { found, unresolved } = await lookupFirstInbound(eoaAddresses, token);
-      for (const [address, result] of found) results.set(address, result);
-      for (const address of unresolved) {
-        results.set(address, { address, status: 'no_inbound', message: '未找到成功且金额大于 0 的普通 BNB 入账' });
+    if (token) {
+      try {
+        const { found, unresolved } = await lookupFirstInbound(eoaAddresses, token);
+        for (const [address, result] of found) results.set(address, result);
+        for (const address of unresolved) {
+          results.set(address, { address, status: 'no_inbound', message: '未找到成功且金额大于 0 的普通 BNB 入账' });
+        }
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        for (const address of eoaAddresses) {
+          if (!results.has(address)) results.set(address, { address, status: 'error', message });
+        }
       }
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      for (const address of eoaAddresses) {
-        if (!results.has(address)) results.set(address, { address, status: 'error', message });
-      }
+    } else {
+      const fallbackResults = await lookupViaProxy(eoaAddresses);
+      for (const [address, result] of fallbackResults) results.set(address, result);
     }
   }
 

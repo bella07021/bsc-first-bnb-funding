@@ -58,6 +58,7 @@ type ApiResponse = {
 };
 
 const addressPattern = /0x[a-fA-F0-9]{40}/g;
+const maxAddresses = 20;
 
 function extractAddresses(value: string) {
   return [...new Set((value.match(addressPattern) ?? []).map((address) => address.toLowerCase()))];
@@ -118,7 +119,7 @@ export default function Home() {
   const [complete, setComplete] = useState(true);
 
   const addresses = useMemo(() => extractAddresses(input), [input]);
-  const tooMany = addresses.length > 100;
+  const tooMany = addresses.length > maxAddresses;
 
   async function runLookup() {
     if (addresses.length === 0 || tooMany || loading) return;
@@ -202,7 +203,7 @@ export default function Home() {
             <Card className="border border-border bg-card shadow-[0_24px_80px_rgba(10,18,35,0.08)] ring-0">
               <CardHeader className="border-b border-border pb-4">
                 <CardTitle className="text-lg">输入地址</CardTitle>
-                <CardDescription>每行一个地址，也支持从文本中自动提取。最多 100 个。</CardDescription>
+                <CardDescription>每行一个地址，也支持从文本中自动提取。最多 {maxAddresses} 个。</CardDescription>
               </CardHeader>
               <CardContent className="space-y-4 pt-1">
                 <Textarea
@@ -216,7 +217,7 @@ export default function Home() {
                 />
                 <div className="flex flex-wrap items-center justify-between gap-3">
                   <p className={`text-xs leading-5 ${tooMany ? 'text-destructive' : 'text-muted-foreground'}`}>
-                    已识别 {addresses.length} 个有效地址{tooMany ? '，超过 100 个上限' : ''}
+                    已识别 {addresses.length} 个有效地址{tooMany ? `，超过 ${maxAddresses} 个上限` : ''}
                   </p>
                   <div className="flex items-center gap-2">
                     {(input || results.length > 0) && (
