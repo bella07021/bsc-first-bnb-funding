@@ -1,6 +1,6 @@
 import { getCexLabel } from '@/lib/cex-labels';
 
-export const runtime = 'edge';
+export const runtime = 'nodejs';
 
 const ADDRESS_PATTERN = /^0x[a-fA-F0-9]{40}$/;
 const MAX_ADDRESSES = 100;

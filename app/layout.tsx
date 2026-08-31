@@ -1,19 +1,15 @@
 import type { Metadata } from 'next';
-import { Geist, Geist_Mono } from 'next/font/google';
 import './globals.css';
 
-const geistSans = Geist({
-  variable: '--font-geist-sans',
-  subsets: ['latin'],
-});
-
-const geistMono = Geist_Mono({
-  variable: '--font-geist-mono',
-  subsets: ['latin'],
-});
+const productionHost = process.env.VERCEL_PROJECT_PRODUCTION_URL;
+const publicOrigin = process.env.NEXT_PUBLIC_SITE_URL
+  ? process.env.NEXT_PUBLIC_SITE_URL
+  : productionHost
+    ? `https://${productionHost}`
+    : 'https://bsc-first-bnb-funding.qian75751.chatgpt.site';
 
 export const metadata: Metadata = {
-  metadataBase: new URL('https://bsc-first-bnb-funding.qian75751.chatgpt.site'),
+  metadataBase: new URL(publicOrigin),
   title: '首笔原生 BNB 到账时间',
   description: '批量查询 BSC EOA 地址的首笔普通原生 BNB 入账与 CEX 来源标签。',
   openGraph: {
@@ -44,11 +40,7 @@ export default function RootLayout({
 }>) {
   return (
     <html lang="zh-CN">
-      <body
-        className={`${geistSans.variable} ${geistMono.variable} antialiased`}
-      >
-        {children}
-      </body>
+      <body className="antialiased">{children}</body>
     </html>
   );
 }
