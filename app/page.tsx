@@ -36,7 +36,7 @@ import {
   TableRow,
 } from '@/components/ui/table';
 import { Textarea } from '@/components/ui/textarea';
-import { buildArrivalGroupMap } from '@/lib/arrival-groups';
+import { buildArrivalGroupDetailsMap } from '@/lib/arrival-groups';
 
 type OkResult = {
   address: string;
@@ -151,15 +151,19 @@ export default function Home() {
   const progressPercent = progress.total
     ? Math.round((progress.processed / progress.total) * 100)
     : 0;
-  const arrivalGroups = useMemo(
+  const arrivalGroupDetails = useMemo(
     () =>
-      buildArrivalGroupMap(
+      buildArrivalGroupDetailsMap(
         results
-          .filter((result): result is OkResult => result.status === 'ok')
-          .map((result) => ({
+          .map((result, index) => ({ result, sequence: index + 1 }))
+          .filter(
+            (entry): entry is { result: OkResult; sequence: number } => entry.result.status === 'ok',
+          )
+          .map(({ result, sequence }) => ({
             address: result.address,
             timestamp: result.timestamp,
             cexExchange: result.cex?.exchange ?? null,
+            sequence,
           })),
       ),
     [results],
@@ -279,6 +283,8 @@ export default function Home() {
           header('查询状态'),
           header('到账时间（UTC+8）'),
           header('到账时间分组'),
+          header('组内地址数'),
+          header('对应序号'),
           header('BNB 金额（精确值）'),
           header('来源 CEX'),
           header('来源地址'),
@@ -287,7 +293,7 @@ export default function Home() {
         ],
         ...results.map((result, index) => {
           if (result.status === 'ok') {
-            const groupNumber = arrivalGroups.get(result.address);
+            const groupDetails = arrivalGroupDetails.get(result.address);
             return [
               index + 1,
               result.address,
@@ -297,9 +303,11 @@ export default function Home() {
                 type: Date,
                 format: 'yyyy-mm-dd hh:mm:ss',
               },
-              groupNumber
-                ? { value: `组别 ${groupNumber}`, backgroundColor: '#FFF4CC', fontWeight: 'bold' as const }
+              groupDetails
+                ? { value: `组别 ${groupDetails.groupNumber}`, backgroundColor: '#FFF4CC', fontWeight: 'bold' as const }
                 : '无',
+              groupDetails?.memberCount ?? '无',
+              groupDetails?.memberSequences.join('、') ?? '无',
               formatWeiForExport(result.amountWei),
               result.cex?.label ?? '未识别',
               result.sourceAddress,
@@ -317,6 +325,8 @@ export default function Home() {
             index + 1,
             result.address,
             statusLabel,
+            null,
+            '无',
             null,
             '无',
             null,
@@ -339,6 +349,8 @@ export default function Home() {
             { width: 16 },
             { width: 23 },
             { width: 18 },
+            { width: 14 },
+            { width: 28 },
             { width: 24 },
             { width: 24 },
             { width: 44 },
@@ -531,18 +543,24 @@ export default function Home() {
                   <Table>
                     <TableHeader>
                       <TableRow className="bg-secondary/45 hover:bg-secondary/45">
-                        <TableHead className="pl-4">地址</TableHead>
+                        <TableHead className="pl-4">序号</TableHead>
+                        <TableHead>地址</TableHead>
                         <TableHead>到账时间</TableHead>
                         <TableHead>到账时间分组</TableHead>
+                        <TableHead>组内地址数</TableHead>
+                        <TableHead>对应序号</TableHead>
                         <TableHead>BNB 金额</TableHead>
                         <TableHead>来源 CEX</TableHead>
                         <TableHead className="pr-4">交易哈希</TableHead>
                       </TableRow>
                     </TableHeader>
                     <TableBody>
-                      {results.map((result) => (
+                      {results.map((result, index) => {
+                        const groupDetails = arrivalGroupDetails.get(result.address);
+                        return (
                         <TableRow key={result.address}>
-                          <TableCell className="pl-4 font-mono text-xs" title={result.address}>
+                          <TableCell className="pl-4 text-sm font-medium">{index + 1}</TableCell>
+                          <TableCell className="font-mono text-xs" title={result.address}>
                             {shortAddress(result.address)}
                           </TableCell>
                           {result.status === 'ok' ? (
@@ -551,13 +569,17 @@ export default function Home() {
                               <TableCell>
                                 {loading ? (
                                   <Badge variant="outline">计算中</Badge>
-                                ) : arrivalGroups.has(result.address) ? (
+                                ) : groupDetails ? (
                                   <Badge className="bg-primary/15 text-primary">
-                                    组别 {arrivalGroups.get(result.address)}
+                                    组别 {groupDetails.groupNumber}
                                   </Badge>
                                 ) : (
                                   <span className="text-sm text-muted-foreground">无</span>
                                 )}
+                              </TableCell>
+                              <TableCell>{loading || !groupDetails ? '无' : groupDetails.memberCount}</TableCell>
+                              <TableCell className="max-w-48 whitespace-normal text-xs leading-5">
+                                {loading || !groupDetails ? '无' : groupDetails.memberSequences.join('、')}
                               </TableCell>
                               <TableCell className="font-medium">{formatWei(result.amountWei)}</TableCell>
                               <TableCell>
@@ -583,12 +605,13 @@ export default function Home() {
                               </TableCell>
                             </>
                           ) : (
-                            <TableCell colSpan={5} className="pr-4">
+                            <TableCell colSpan={7} className="pr-4">
                               <StatusMessage result={result} />
                             </TableCell>
                           )}
                         </TableRow>
-                      ))}
+                        );
+                      })}
                     </TableBody>
                   </Table>
                 )}

@@ -4,6 +4,16 @@ export type ArrivalGroupCandidate = {
   cexExchange: string | null;
 };
 
+export type IndexedArrivalGroupCandidate = ArrivalGroupCandidate & {
+  sequence: number;
+};
+
+export type ArrivalGroupDetails = {
+  groupNumber: number;
+  memberCount: number;
+  memberSequences: number[];
+};
+
 type QualifiedRun = {
   members: ArrivalGroupCandidate[];
   firstTimestamp: number;
@@ -46,7 +56,10 @@ export function buildArrivalGroupMap(
 
     for (const candidate of sorted) {
       const previous = run.at(-1);
-      if (!previous || candidate.timestamp - previous.timestamp <= maxGapSeconds) {
+      if (
+        !previous ||
+        candidate.timestamp - previous.timestamp <= maxGapSeconds
+      ) {
         run.push(candidate);
       } else {
         finishRun();
@@ -68,4 +81,38 @@ export function buildArrivalGroupMap(
     for (const member of run.members) groups.set(member.address, index + 1);
   });
   return groups;
+}
+
+export function buildArrivalGroupDetailsMap(
+  candidates: IndexedArrivalGroupCandidate[],
+  options: { maxGapSeconds?: number; minGroupSize?: number } = {},
+) {
+  const groupNumbers = buildArrivalGroupMap(candidates, options);
+  const sequencesByGroup = new Map<number, number[]>();
+
+  for (const candidate of candidates) {
+    const groupNumber = groupNumbers.get(candidate.address);
+    if (!groupNumber) continue;
+    const sequences = sequencesByGroup.get(groupNumber) ?? [];
+    sequences.push(candidate.sequence);
+    sequencesByGroup.set(groupNumber, sequences);
+  }
+
+  for (const sequences of sequencesByGroup.values()) {
+    sequences.sort((a, b) => a - b);
+  }
+
+  const details = new Map<string, ArrivalGroupDetails>();
+  for (const candidate of candidates) {
+    const groupNumber = groupNumbers.get(candidate.address);
+    if (!groupNumber) continue;
+    const memberSequences = sequencesByGroup.get(groupNumber) ?? [];
+    details.set(candidate.address, {
+      groupNumber,
+      memberCount: memberSequences.length,
+      memberSequences,
+    });
+  }
+
+  return details;
 }
