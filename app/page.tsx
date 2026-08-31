@@ -598,7 +598,7 @@ export default function Home() {
         </section>
 
         <footer className="mt-12 border-t border-border pt-5 text-xs leading-5 text-muted-foreground">
-          “首笔原生 BNB 到账”指最早一笔成功、金额大于 0 的普通链上交易；不包含内部交易。到账时间分组要求来源为同一家已识别 CEX、相邻到账严格小于 20 分钟且连续至少 5 个地址。CEX 标签采用精确地址匹配，未命中不代表一定不是交易所地址。
+          “首笔原生 BNB 到账”指最早一笔成功、金额大于 0 的普通链上交易；不包含内部交易。到账时间分组要求来源为同一家已识别 CEX（同一 CEX 的不同热钱包统一计算）、相邻到账间隔不超过 20 分钟且连续至少 2 个地址。CEX 标签采用精确地址匹配，未命中不代表一定不是交易所地址。
         </footer>
       </div>
     </main>

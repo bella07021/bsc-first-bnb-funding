@@ -30,6 +30,18 @@ const labels: Record<string, CexLabel> = {
     exchange: 'Binance',
     label: 'Binance: Hot Wallet 16',
   },
+  '0x8894e0a0c962cb723c1976a4421c95949be2d4e3': {
+    exchange: 'Binance',
+    label: 'Binance: Hot Wallet 6',
+  },
+  '0xe2fc31f816a9b94326492132018c3aecc4a93ae1': {
+    exchange: 'Binance',
+    label: 'Binance: Hot Wallet 7',
+  },
+  '0x3c783c21a0383057d128bae431894a5c19f9cf06': {
+    exchange: 'Binance',
+    label: 'Binance: Hot Wallet 8',
+  },
   '0x29bdfbf7d27462a2d115748ace2bd71a2646946c': {
     exchange: 'Binance',
     label: 'Binance: Hot Wallet 17',

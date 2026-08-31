@@ -15,7 +15,7 @@ export function buildArrivalGroupMap(
   options: { maxGapSeconds?: number; minGroupSize?: number } = {},
 ) {
   const maxGapSeconds = options.maxGapSeconds ?? 20 * 60;
-  const minGroupSize = options.minGroupSize ?? 5;
+  const minGroupSize = options.minGroupSize ?? 2;
   const byExchange = new Map<string, ArrivalGroupCandidate[]>();
 
   for (const candidate of candidates) {
@@ -46,7 +46,7 @@ export function buildArrivalGroupMap(
 
     for (const candidate of sorted) {
       const previous = run.at(-1);
-      if (!previous || candidate.timestamp - previous.timestamp < maxGapSeconds) {
+      if (!previous || candidate.timestamp - previous.timestamp <= maxGapSeconds) {
         run.push(candidate);
       } else {
         finishRun();
