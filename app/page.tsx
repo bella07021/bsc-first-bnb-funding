@@ -1,0 +1,346 @@
+'use client';
+
+import { useMemo, useState } from 'react';
+import {
+  AlertCircle,
+  ArrowUpRight,
+  CheckCircle2,
+  Database,
+  Search,
+  ShieldCheck,
+  Trash2,
+} from 'lucide-react';
+
+import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
+import { Badge } from '@/components/ui/badge';
+import { Button } from '@/components/ui/button';
+import {
+  Card,
+  CardContent,
+  CardDescription,
+  CardHeader,
+  CardTitle,
+} from '@/components/ui/card';
+import { Spinner } from '@/components/ui/spinner';
+import {
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from '@/components/ui/table';
+import { Textarea } from '@/components/ui/textarea';
+
+type OkResult = {
+  address: string;
+  status: 'ok';
+  timestamp: number;
+  amountWei: string;
+  transactionHash: string;
+  sourceAddress: string;
+  cex: { exchange: string; label: string } | null;
+};
+
+type OtherResult = {
+  address: string;
+  status: 'no_inbound' | 'contract' | 'error';
+  message: string;
+};
+
+type LookupResult = OkResult | OtherResult;
+
+type ApiResponse = {
+  complete: boolean;
+  results: LookupResult[];
+  error?: string;
+  detail?: string;
+};
+
+const addressPattern = /0x[a-fA-F0-9]{40}/g;
+
+function extractAddresses(value: string) {
+  return [...new Set((value.match(addressPattern) ?? []).map((address) => address.toLowerCase()))];
+}
+
+function shortAddress(value: string) {
+  return `${value.slice(0, 8)}…${value.slice(-6)}`;
+}
+
+function formatWei(value: string) {
+  const wei = BigInt(value);
+  const base = 10n ** 18n;
+  const whole = wei / base;
+  const fraction = (wei % base).toString().padStart(18, '0').replace(/0+$/, '');
+  return fraction ? `${whole}.${fraction} BNB` : `${whole} BNB`;
+}
+
+function formatTimestamp(timestamp: number) {
+  return new Intl.DateTimeFormat('zh-CN', {
+    timeZone: 'Asia/Shanghai',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+    hour12: false,
+  })
+    .format(new Date(timestamp * 1000))
+    .replaceAll('/', '-');
+}
+
+function StatusMessage({ result }: { result: OtherResult }) {
+  const styles = {
+    no_inbound: 'bg-secondary text-muted-foreground',
+    contract: 'bg-amber-100 text-amber-800',
+    error: 'bg-red-50 text-red-700',
+  } as const;
+  const labels = {
+    no_inbound: '无普通入账',
+    contract: '非普通 EOA',
+    error: '查询失败',
+  } as const;
+
+  return (
+    <div className="flex items-center gap-2">
+      <Badge className={styles[result.status]}>{labels[result.status]}</Badge>
+      <span className="max-w-[430px] whitespace-normal text-xs text-muted-foreground">{result.message}</span>
+    </div>
+  );
+}
+
+export default function Home() {
+  const [input, setInput] = useState('');
+  const [results, setResults] = useState<LookupResult[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState('');
+  const [complete, setComplete] = useState(true);
+
+  const addresses = useMemo(() => extractAddresses(input), [input]);
+  const tooMany = addresses.length > 100;
+
+  async function runLookup() {
+    if (addresses.length === 0 || tooMany || loading) return;
+    setLoading(true);
+    setError('');
+    setResults([]);
+
+    try {
+      const response = await fetch('/api/lookup', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ addresses }),
+      });
+      const payload = (await response.json()) as ApiResponse;
+      if (!response.ok) throw new Error([payload.error, payload.detail].filter(Boolean).join('：'));
+      setResults(payload.results ?? []);
+      setComplete(payload.complete);
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : '查询失败，请稍后重试');
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  function clearAll() {
+    setInput('');
+    setResults([]);
+    setError('');
+    setComplete(true);
+  }
+
+  return (
+    <main className="min-h-screen bg-background text-foreground">
+      <div className="mx-auto w-full max-w-[1180px] px-5 py-6 sm:px-8 lg:py-10">
+        <header className="mb-10 flex items-center justify-between">
+          <div className="flex items-center gap-3">
+            <div className="grid size-10 place-items-center rounded-xl bg-primary text-primary-foreground shadow-[0_8px_24px_rgba(240,185,11,0.18)]">
+              <Database className="size-5" />
+            </div>
+            <div>
+              <p className="text-[11px] font-semibold uppercase tracking-[0.2em] text-muted-foreground">
+                BNB Smart Chain
+              </p>
+              <p className="text-sm font-semibold">链上地址工具</p>
+            </div>
+          </div>
+          <Badge variant="outline" className="border-primary/30 bg-primary/10 text-primary">
+            BSC Mainnet
+          </Badge>
+        </header>
+
+        <section className="grid items-start gap-7 lg:grid-cols-[minmax(0,0.95fr)_minmax(480px,1.35fr)]">
+          <div className="pt-2 lg:sticky lg:top-10">
+            <div className="mb-5 inline-flex items-center gap-2 rounded-full border border-border bg-card px-3 py-1.5 text-xs text-muted-foreground shadow-sm">
+              <ShieldCheck className="size-3.5 text-primary" />
+              仅查询普通原生 BNB 入账，不含内部交易
+            </div>
+            <h1 className="max-w-xl text-balance text-4xl font-semibold tracking-[-0.045em] sm:text-5xl sm:leading-[1.08]">
+              首笔原生 BNB
+              <span className="block text-primary">到账时间</span>
+            </h1>
+            <p className="mt-5 max-w-lg text-pretty text-base leading-7 text-muted-foreground">
+              批量粘贴 BSC EOA 地址，定位历史上最早一笔成功、金额大于 0 的普通 BNB 入账，并识别已收录的 CEX 来源地址。
+            </p>
+
+            <div className="mt-8 grid grid-cols-3 gap-3">
+              {[
+                ['01', '普通入账'],
+                ['02', '最早一笔'],
+                ['03', 'CEX 标签'],
+              ].map(([number, label]) => (
+                <div key={number} className="border-l border-border pl-3">
+                  <div className="font-mono text-xs text-primary">{number}</div>
+                  <div className="mt-1 text-sm font-medium">{label}</div>
+                </div>
+              ))}
+            </div>
+          </div>
+
+          <div className="space-y-5">
+            <Card className="border border-border bg-card shadow-[0_24px_80px_rgba(10,18,35,0.08)] ring-0">
+              <CardHeader className="border-b border-border pb-4">
+                <CardTitle className="text-lg">输入地址</CardTitle>
+                <CardDescription>每行一个地址，也支持从文本中自动提取。最多 100 个。</CardDescription>
+              </CardHeader>
+              <CardContent className="space-y-4 pt-1">
+                <Textarea
+                  value={input}
+                  onChange={(event) => setInput(event.target.value)}
+                  aria-label="BSC EOA 地址列表"
+                  aria-invalid={tooMany}
+                  className="min-h-44 resize-y border-border bg-secondary/45 p-4 font-mono text-sm leading-6 focus-visible:border-primary focus-visible:ring-primary/20"
+                  placeholder={'0x1234...\n0xabcd...'}
+                  spellCheck={false}
+                />
+                <div className="flex flex-wrap items-center justify-between gap-3">
+                  <p className={`text-xs leading-5 ${tooMany ? 'text-destructive' : 'text-muted-foreground'}`}>
+                    已识别 {addresses.length} 个有效地址{tooMany ? '，超过 100 个上限' : ''}
+                  </p>
+                  <div className="flex items-center gap-2">
+                    {(input || results.length > 0) && (
+                      <Button variant="ghost" size="lg" className="h-10" onClick={clearAll} disabled={loading}>
+                        <Trash2 data-icon="inline-start" />
+                        清空
+                      </Button>
+                    )}
+                    <Button
+                      size="lg"
+                      className="h-10 min-w-28 rounded-xl bg-primary px-4 text-primary-foreground hover:bg-primary/85"
+                      onClick={runLookup}
+                      disabled={addresses.length === 0 || tooMany || loading}
+                    >
+                      {loading ? <Spinner /> : <Search data-icon="inline-start" />}
+                      {loading ? '查询中' : '开始查询'}
+                    </Button>
+                  </div>
+                </div>
+              </CardContent>
+            </Card>
+
+            {error && (
+              <Alert variant="destructive" className="border-destructive/25 bg-red-50/70 px-4 py-3">
+                <AlertCircle />
+                <AlertTitle>本次查询未完成</AlertTitle>
+                <AlertDescription>{error}</AlertDescription>
+              </Alert>
+            )}
+
+            {results.length > 0 && !complete && (
+              <Alert className="border-amber-300 bg-amber-50 px-4 py-3 text-amber-900">
+                <AlertCircle />
+                <AlertTitle>部分地址查询失败</AlertTitle>
+                <AlertDescription>失败项不会被当作“无普通入账”，请稍后重试。</AlertDescription>
+              </Alert>
+            )}
+
+            <Card className="border border-border bg-card ring-0">
+              <CardHeader className="border-b border-border pb-4">
+                <div className="flex items-center justify-between gap-3">
+                  <div>
+                    <CardTitle>查询结果</CardTitle>
+                    <CardDescription className="mt-1">时间统一显示为北京时间（UTC+8）</CardDescription>
+                  </div>
+                  {results.length > 0 && (
+                    <Badge variant={complete ? 'secondary' : 'outline'}>
+                      {complete ? <CheckCircle2 className="size-3" /> : <AlertCircle className="size-3" />}
+                      {results.length} 个地址
+                    </Badge>
+                  )}
+                </div>
+              </CardHeader>
+              <CardContent className="px-0 pb-0">
+                {results.length === 0 ? (
+                  <div className="grid min-h-44 place-items-center px-6 text-center">
+                    <div>
+                      <Search className="mx-auto mb-3 size-6 text-muted-foreground/50" />
+                      <p className="text-sm font-medium">等待查询</p>
+                      <p className="mt-1 text-xs text-muted-foreground">结果将显示到账时间、BNB 金额、CEX 标签和交易哈希。</p>
+                    </div>
+                  </div>
+                ) : (
+                  <Table>
+                    <TableHeader>
+                      <TableRow className="bg-secondary/45 hover:bg-secondary/45">
+                        <TableHead className="pl-4">地址</TableHead>
+                        <TableHead>到账时间</TableHead>
+                        <TableHead>BNB 金额</TableHead>
+                        <TableHead>来源 CEX</TableHead>
+                        <TableHead className="pr-4">交易哈希</TableHead>
+                      </TableRow>
+                    </TableHeader>
+                    <TableBody>
+                      {results.map((result) => (
+                        <TableRow key={result.address}>
+                          <TableCell className="pl-4 font-mono text-xs" title={result.address}>
+                            {shortAddress(result.address)}
+                          </TableCell>
+                          {result.status === 'ok' ? (
+                            <>
+                              <TableCell>{formatTimestamp(result.timestamp)}</TableCell>
+                              <TableCell className="font-medium">{formatWei(result.amountWei)}</TableCell>
+                              <TableCell>
+                                {result.cex ? (
+                                  <Badge className="bg-primary/15 text-primary" title={result.sourceAddress}>
+                                    {result.cex.label}
+                                  </Badge>
+                                ) : (
+                                  <Badge variant="outline" title={result.sourceAddress}>未识别</Badge>
+                                )}
+                              </TableCell>
+                              <TableCell className="pr-4">
+                                <a
+                                  href={`https://bscscan.com/tx/${result.transactionHash}`}
+                                  target="_blank"
+                                  rel="noreferrer"
+                                  className="inline-flex items-center gap-1 font-mono text-xs text-muted-foreground underline-offset-4 hover:text-foreground hover:underline"
+                                  title={result.transactionHash}
+                                >
+                                  {shortAddress(result.transactionHash)}
+                                  <ArrowUpRight className="size-3" />
+                                </a>
+                              </TableCell>
+                            </>
+                          ) : (
+                            <TableCell colSpan={4} className="pr-4">
+                              <StatusMessage result={result} />
+                            </TableCell>
+                          )}
+                        </TableRow>
+                      ))}
+                    </TableBody>
+                  </Table>
+                )}
+              </CardContent>
+            </Card>
+          </div>
+        </section>
+
+        <footer className="mt-12 border-t border-border pt-5 text-xs leading-5 text-muted-foreground">
+          “首笔原生 BNB 到账”指最早一笔成功、金额大于 0 的普通链上交易；不包含内部交易。CEX 标签采用精确地址匹配，未命中不代表一定不是交易所地址。
+        </footer>
+      </div>
+    </main>
+  );
+}
