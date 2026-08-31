@@ -23,6 +23,10 @@ import {
 } from '@/components/ui/card';
 import { Spinner } from '@/components/ui/spinner';
 import {
+  Progress,
+  ProgressLabel,
+} from '@/components/ui/progress';
+import {
   Table,
   TableBody,
   TableCell,
@@ -57,8 +61,22 @@ type ApiResponse = {
   detail?: string;
 };
 
+type LookupProgress = {
+  processed: number;
+  total: number;
+  batch: number;
+  totalBatches: number;
+};
+
 const addressPattern = /0x[a-fA-F0-9]{40}/g;
-const maxAddresses = 20;
+const maxAddresses = 300;
+const batchSize = 20;
+const emptyProgress: LookupProgress = {
+  processed: 0,
+  total: 0,
+  batch: 0,
+  totalBatches: 0,
+};
 
 function extractAddresses(value: string) {
   return [...new Set((value.match(addressPattern) ?? []).map((address) => address.toLowerCase()))];
@@ -117,26 +135,79 @@ export default function Home() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
   const [complete, setComplete] = useState(true);
+  const [progress, setProgress] = useState<LookupProgress>(emptyProgress);
 
   const addresses = useMemo(() => extractAddresses(input), [input]);
   const tooMany = addresses.length > maxAddresses;
+  const progressPercent = progress.total
+    ? Math.round((progress.processed / progress.total) * 100)
+    : 0;
 
   async function runLookup() {
     if (addresses.length === 0 || tooMany || loading) return;
+    const queryAddresses = [...addresses];
+    const totalBatches = Math.ceil(queryAddresses.length / batchSize);
     setLoading(true);
     setError('');
     setResults([]);
+    setComplete(true);
+    setProgress({
+      processed: 0,
+      total: queryAddresses.length,
+      batch: 1,
+      totalBatches,
+    });
 
     try {
-      const response = await fetch('/api/lookup', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ addresses }),
-      });
-      const payload = (await response.json()) as ApiResponse;
-      if (!response.ok) throw new Error([payload.error, payload.detail].filter(Boolean).join('：'));
-      setResults(payload.results ?? []);
-      setComplete(payload.complete);
+      let aggregatedResults: LookupResult[] = [];
+      let allComplete = true;
+
+      for (let offset = 0; offset < queryAddresses.length; offset += batchSize) {
+        const batchNumber = Math.floor(offset / batchSize) + 1;
+        const batch = queryAddresses.slice(offset, offset + batchSize);
+        setProgress({
+          processed: offset,
+          total: queryAddresses.length,
+          batch: batchNumber,
+          totalBatches,
+        });
+
+        let batchResults: LookupResult[];
+        try {
+          const response = await fetch('/api/lookup', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ addresses: batch }),
+          });
+          const payload = (await response.json()) as ApiResponse;
+          if (!response.ok) {
+            throw new Error([payload.error, payload.detail].filter(Boolean).join('：') || `HTTP ${response.status}`);
+          }
+          batchResults = payload.results ?? [];
+          if (batchResults.length !== batch.length) {
+            throw new Error('返回结果数量与本批地址数量不一致');
+          }
+          allComplete = allComplete && payload.complete;
+        } catch (cause) {
+          allComplete = false;
+          const message = cause instanceof Error ? cause.message : '查询失败，请稍后重试';
+          batchResults = batch.map((address) => ({
+            address,
+            status: 'error',
+            message: `第 ${batchNumber} 批查询失败：${message}`,
+          }));
+        }
+
+        aggregatedResults = [...aggregatedResults, ...batchResults];
+        setResults(aggregatedResults);
+        setComplete(allComplete);
+        setProgress({
+          processed: Math.min(offset + batch.length, queryAddresses.length),
+          total: queryAddresses.length,
+          batch: batchNumber,
+          totalBatches,
+        });
+      }
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : '查询失败，请稍后重试');
     } finally {
@@ -144,11 +215,21 @@ export default function Home() {
     }
   }
 
+  function updateInput(value: string) {
+    if (loading) return;
+    setInput(value);
+    setResults([]);
+    setError('');
+    setComplete(true);
+    setProgress(emptyProgress);
+  }
+
   function clearAll() {
     setInput('');
     setResults([]);
     setError('');
     setComplete(true);
+    setProgress(emptyProgress);
   }
 
   return (
@@ -208,9 +289,10 @@ export default function Home() {
               <CardContent className="space-y-4 pt-1">
                 <Textarea
                   value={input}
-                  onChange={(event) => setInput(event.target.value)}
+                  onChange={(event) => updateInput(event.target.value)}
                   aria-label="BSC EOA 地址列表"
                   aria-invalid={tooMany}
+                  disabled={loading}
                   className="min-h-44 resize-y border-border bg-secondary/45 p-4 font-mono text-sm leading-6 focus-visible:border-primary focus-visible:ring-primary/20"
                   placeholder={'0x1234...\n0xabcd...'}
                   spellCheck={false}
@@ -237,6 +319,25 @@ export default function Home() {
                     </Button>
                   </div>
                 </div>
+                {progress.total > 0 && (
+                  <div className="rounded-xl border border-border bg-secondary/45 p-4" aria-live="polite">
+                    <Progress value={progressPercent}>
+                      <ProgressLabel>
+                        {loading
+                          ? `正在查询第 ${progress.batch}/${progress.totalBatches} 批`
+                          : complete
+                            ? '全部查询完成'
+                            : '查询完成，包含失败项'}
+                      </ProgressLabel>
+                      <span className="ml-auto text-sm tabular-nums text-muted-foreground">
+                        {progress.processed}/{progress.total} · {progressPercent}%
+                      </span>
+                    </Progress>
+                    <p className="mt-2 text-xs leading-5 text-muted-foreground">
+                      每批最多 {batchSize} 个地址，依次查询并统一汇总。查询期间请保持页面打开。
+                    </p>
+                  </div>
+                )}
               </CardContent>
             </Card>
 
