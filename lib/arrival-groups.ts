@@ -1,7 +1,8 @@
 export type ArrivalGroupCandidate = {
+  id: string;
   address: string;
   timestamp: number;
-  cexExchange: string | null;
+  sourceAddress: string;
 };
 
 export type IndexedArrivalGroupCandidate = ArrivalGroupCandidate & {
@@ -17,7 +18,7 @@ export type ArrivalGroupDetails = {
 type QualifiedRun = {
   members: ArrivalGroupCandidate[];
   firstTimestamp: number;
-  exchangeKey: string;
+  sourceAddress: string;
 };
 
 export function buildArrivalGroupMap(
@@ -26,19 +27,19 @@ export function buildArrivalGroupMap(
 ) {
   const maxGapSeconds = options.maxGapSeconds ?? 20 * 60;
   const minGroupSize = options.minGroupSize ?? 2;
-  const byExchange = new Map<string, ArrivalGroupCandidate[]>();
+  const bySourceAddress = new Map<string, ArrivalGroupCandidate[]>();
 
   for (const candidate of candidates) {
-    const exchangeKey = candidate.cexExchange?.trim().toLowerCase();
-    if (!exchangeKey || !Number.isFinite(candidate.timestamp)) continue;
-    const bucket = byExchange.get(exchangeKey) ?? [];
+    const sourceAddress = candidate.sourceAddress.trim().toLowerCase();
+    if (!sourceAddress || !Number.isFinite(candidate.timestamp)) continue;
+    const bucket = bySourceAddress.get(sourceAddress) ?? [];
     bucket.push(candidate);
-    byExchange.set(exchangeKey, bucket);
+    bySourceAddress.set(sourceAddress, bucket);
   }
 
   const qualifiedRuns: QualifiedRun[] = [];
-  for (const [exchangeKey, exchangeCandidates] of byExchange) {
-    const sorted = [...exchangeCandidates].sort(
+  for (const [sourceAddress, sourceCandidates] of bySourceAddress) {
+    const sorted = [...sourceCandidates].sort(
       (a, b) => a.timestamp - b.timestamp || a.address.localeCompare(b.address),
     );
     let run: ArrivalGroupCandidate[] = [];
@@ -48,7 +49,7 @@ export function buildArrivalGroupMap(
         qualifiedRuns.push({
           members: run,
           firstTimestamp: run[0].timestamp,
-          exchangeKey,
+          sourceAddress,
         });
       }
       run = [];
@@ -72,13 +73,13 @@ export function buildArrivalGroupMap(
   qualifiedRuns.sort(
     (a, b) =>
       a.firstTimestamp - b.firstTimestamp ||
-      a.exchangeKey.localeCompare(b.exchangeKey) ||
+      a.sourceAddress.localeCompare(b.sourceAddress) ||
       a.members[0].address.localeCompare(b.members[0].address),
   );
 
   const groups = new Map<string, number>();
   qualifiedRuns.forEach((run, index) => {
-    for (const member of run.members) groups.set(member.address, index + 1);
+    for (const member of run.members) groups.set(member.id, index + 1);
   });
   return groups;
 }
@@ -91,7 +92,7 @@ export function buildArrivalGroupDetailsMap(
   const sequencesByGroup = new Map<number, number[]>();
 
   for (const candidate of candidates) {
-    const groupNumber = groupNumbers.get(candidate.address);
+    const groupNumber = groupNumbers.get(candidate.id);
     if (!groupNumber) continue;
     const sequences = sequencesByGroup.get(groupNumber) ?? [];
     sequences.push(candidate.sequence);
@@ -104,10 +105,10 @@ export function buildArrivalGroupDetailsMap(
 
   const details = new Map<string, ArrivalGroupDetails>();
   for (const candidate of candidates) {
-    const groupNumber = groupNumbers.get(candidate.address);
+    const groupNumber = groupNumbers.get(candidate.id);
     if (!groupNumber) continue;
     const memberSequences = sequencesByGroup.get(groupNumber) ?? [];
-    details.set(candidate.address, {
+    details.set(candidate.id, {
       groupNumber,
       memberCount: memberSequences.length,
       memberSequences,

@@ -1,6 +1,7 @@
 'use client';
 
 import { useMemo, useState } from 'react';
+import type { SheetData } from 'write-excel-file/browser';
 import {
   AlertCircle,
   ArrowUpRight,
@@ -23,10 +24,7 @@ import {
   CardTitle,
 } from '@/components/ui/card';
 import { Spinner } from '@/components/ui/spinner';
-import {
-  Progress,
-  ProgressLabel,
-} from '@/components/ui/progress';
+import { Progress, ProgressLabel } from '@/components/ui/progress';
 import {
   Table,
   TableBody,
@@ -38,14 +36,18 @@ import {
 import { Textarea } from '@/components/ui/textarea';
 import { buildArrivalGroupDetailsMap } from '@/lib/arrival-groups';
 
-type OkResult = {
-  address: string;
-  status: 'ok';
+type CexFunding = {
   timestamp: number;
   amountWei: string;
   transactionHash: string;
   sourceAddress: string;
-  cex: { exchange: string; label: string } | null;
+  cex: { exchange: string; label: string };
+};
+
+type OkResult = {
+  address: string;
+  status: 'ok';
+  fundings: CexFunding[];
 };
 
 type OtherResult = {
@@ -81,11 +83,21 @@ const emptyProgress: LookupProgress = {
 };
 
 function extractAddresses(value: string) {
-  return [...new Set((value.match(addressPattern) ?? []).map((address) => address.toLowerCase()))];
+  return [
+    ...new Set(
+      (value.match(addressPattern) ?? []).map((address) =>
+        address.toLowerCase(),
+      ),
+    ),
+  ];
 }
 
 function shortAddress(value: string) {
   return `${value.slice(0, 8)}…${value.slice(-6)}`;
+}
+
+function relationId(address: string, sourceAddress: string) {
+  return `${address.toLowerCase()}:${sourceAddress.toLowerCase()}`;
 }
 
 function formatWei(value: string) {
@@ -123,7 +135,7 @@ function StatusMessage({ result }: { result: OtherResult }) {
     error: 'bg-red-50 text-red-700',
   } as const;
   const labels = {
-    no_inbound: '无普通入账',
+    no_inbound: '无 CEX 入账',
     contract: '非普通 EOA',
     error: '查询失败',
   } as const;
@@ -131,7 +143,9 @@ function StatusMessage({ result }: { result: OtherResult }) {
   return (
     <div className="flex items-center gap-2">
       <Badge className={styles[result.status]}>{labels[result.status]}</Badge>
-      <span className="max-w-[430px] whitespace-normal text-xs text-muted-foreground">{result.message}</span>
+      <span className="max-w-[430px] whitespace-normal text-xs text-muted-foreground">
+        {result.message}
+      </span>
     </div>
   );
 }
@@ -151,22 +165,32 @@ export default function Home() {
   const progressPercent = progress.total
     ? Math.round((progress.processed / progress.total) * 100)
     : 0;
+  const fundingRows = useMemo(
+    () =>
+      results.flatMap((result, index) =>
+        result.status === 'ok'
+          ? result.fundings.map((funding) => ({
+              id: relationId(result.address, funding.sourceAddress),
+              address: result.address,
+              funding,
+              sequence: index + 1,
+            }))
+          : [],
+      ),
+    [results],
+  );
   const arrivalGroupDetails = useMemo(
     () =>
       buildArrivalGroupDetailsMap(
-        results
-          .map((result, index) => ({ result, sequence: index + 1 }))
-          .filter(
-            (entry): entry is { result: OkResult; sequence: number } => entry.result.status === 'ok',
-          )
-          .map(({ result, sequence }) => ({
-            address: result.address,
-            timestamp: result.timestamp,
-            cexExchange: result.cex?.exchange ?? null,
-            sequence,
-          })),
+        fundingRows.map(({ id, address, funding, sequence }) => ({
+          id,
+          address,
+          timestamp: funding.timestamp,
+          sourceAddress: funding.sourceAddress,
+          sequence,
+        })),
       ),
-    [results],
+    [fundingRows],
   );
 
   async function runLookup() {
@@ -189,7 +213,11 @@ export default function Home() {
       let aggregatedResults: LookupResult[] = [];
       let allComplete = true;
 
-      for (let offset = 0; offset < queryAddresses.length; offset += batchSize) {
+      for (
+        let offset = 0;
+        offset < queryAddresses.length;
+        offset += batchSize
+      ) {
         const batchNumber = Math.floor(offset / batchSize) + 1;
         const batch = queryAddresses.slice(offset, offset + batchSize);
         setProgress({
@@ -208,7 +236,10 @@ export default function Home() {
           });
           const payload = (await response.json()) as ApiResponse;
           if (!response.ok) {
-            throw new Error([payload.error, payload.detail].filter(Boolean).join('：') || `HTTP ${response.status}`);
+            throw new Error(
+              [payload.error, payload.detail].filter(Boolean).join('：') ||
+                `HTTP ${response.status}`,
+            );
           }
           batchResults = payload.results ?? [];
           if (batchResults.length !== batch.length) {
@@ -217,11 +248,10 @@ export default function Home() {
           allComplete = allComplete && payload.complete;
         } catch (cause) {
           allComplete = false;
-          const message = cause instanceof Error ? cause.message : '查询失败，请稍后重试';
           batchResults = batch.map((address) => ({
             address,
             status: 'error',
-            message: `第 ${batchNumber} 批查询失败：${message}`,
+            message: `第 ${batchNumber} 批查询失败：${cause instanceof Error ? cause.message : '查询失败，请稍后重试'}`,
           }));
         }
 
@@ -267,7 +297,8 @@ export default function Home() {
     setExportError('');
 
     try {
-      const { default: writeExcelFile } = await import('write-excel-file/browser');
+      const { default: writeExcelFile } =
+        await import('write-excel-file/browser');
       const header = (value: string) => ({
         value,
         fontWeight: 'bold' as const,
@@ -276,7 +307,7 @@ export default function Home() {
         align: 'center' as const,
         alignVertical: 'center' as const,
       });
-      const sheetData = [
+      const sheetData: SheetData = [
         [
           header('序号'),
           header('地址'),
@@ -291,53 +322,64 @@ export default function Home() {
           header('交易哈希'),
           header('备注'),
         ],
-        ...results.map((result, index) => {
-          if (result.status === 'ok') {
-            const groupDetails = arrivalGroupDetails.get(result.address);
-            return [
+      ];
+      results.forEach((result, index) => {
+        if (result.status === 'ok') {
+          for (const funding of result.fundings) {
+            const groupDetails = arrivalGroupDetails.get(
+              relationId(result.address, funding.sourceAddress),
+            );
+            sheetData.push([
               index + 1,
               result.address,
               '成功',
               {
-                value: new Date((result.timestamp + 8 * 60 * 60) * 1000),
+                value: new Date((funding.timestamp + 8 * 60 * 60) * 1000),
                 type: Date,
                 format: 'yyyy-mm-dd hh:mm:ss',
               },
               groupDetails
-                ? { value: `组别 ${groupDetails.groupNumber}`, backgroundColor: '#FFF4CC', fontWeight: 'bold' as const }
+                ? {
+                    value: `组别 ${groupDetails.groupNumber}`,
+                    backgroundColor: '#FFF4CC',
+                    fontWeight: 'bold' as const,
+                  }
                 : '无',
               groupDetails?.memberCount ?? '无',
               groupDetails?.memberSequences.join('、') ?? '无',
-              formatWeiForExport(result.amountWei),
-              result.cex?.label ?? '未识别',
-              result.sourceAddress,
-              result.transactionHash,
+              formatWeiForExport(funding.amountWei),
+              funding.cex.label,
+              funding.sourceAddress,
+              funding.transactionHash,
               '',
-            ];
+            ]);
           }
+          return;
+        }
 
-          const statusLabel = {
-            no_inbound: '无普通入账',
-            contract: '非普通 EOA',
-            error: '查询失败',
-          }[result.status];
-          return [
-            index + 1,
-            result.address,
-            statusLabel,
-            null,
-            '无',
-            null,
-            '无',
-            null,
-            null,
-            null,
-            null,
-            result.message,
-          ];
-        }),
-      ];
-      const timestamp = formatTimestamp(Math.floor(Date.now() / 1000)).replace(/\D/g, '').slice(0, 14);
+        const statusLabel = {
+          no_inbound: '无 CEX 入账',
+          contract: '非普通 EOA',
+          error: '查询失败',
+        }[result.status];
+        sheetData.push([
+          index + 1,
+          result.address,
+          statusLabel,
+          null,
+          '无',
+          null,
+          '无',
+          null,
+          null,
+          null,
+          null,
+          result.message,
+        ]);
+      });
+      const timestamp = formatTimestamp(Math.floor(Date.now() / 1000))
+        .replace(/\D/g, '')
+        .slice(0, 14);
 
       await writeExcelFile(
         sheetData,
@@ -363,9 +405,11 @@ export default function Home() {
           zoomScale: 0.85,
         },
         { fontFamily: 'Aptos', fontSize: 11 },
-      ).toFile(`首笔原生BNB到账时间-${timestamp}.xlsx`);
+      ).toFile(`CEX热钱包首笔BNB到账关系-${timestamp}.xlsx`);
     } catch (cause) {
-      setExportError(cause instanceof Error ? cause.message : '生成 Excel 文件失败');
+      setExportError(
+        cause instanceof Error ? cause.message : '生成 Excel 文件失败',
+      );
     } finally {
       setExporting(false);
     }
@@ -386,7 +430,10 @@ export default function Home() {
               <p className="text-sm font-semibold">链上地址工具</p>
             </div>
           </div>
-          <Badge variant="outline" className="border-primary/30 bg-primary/10 text-primary">
+          <Badge
+            variant="outline"
+            className="border-primary/30 bg-primary/10 text-primary"
+          >
             BSC Mainnet
           </Badge>
         </header>
@@ -395,21 +442,23 @@ export default function Home() {
           <div className="pt-2">
             <div className="mb-5 inline-flex items-center gap-2 rounded-full border border-border bg-card px-3 py-1.5 text-xs text-muted-foreground shadow-sm">
               <ShieldCheck className="size-3.5 text-primary" />
-              仅查询普通原生 BNB 入账，不含内部交易
+              仅查询来自已识别 CEX 热钱包的普通原生 BNB 入账
             </div>
             <h1 className="max-w-xl text-balance text-4xl font-semibold tracking-[-0.045em] sm:text-5xl sm:leading-[1.08]">
-              首笔原生 BNB
-              <span className="block text-primary">到账时间</span>
+              CEX 热钱包首笔 BNB
+              <span className="block text-primary">到账关系与分组</span>
             </h1>
             <p className="mt-5 max-w-lg text-pretty text-base leading-7 text-muted-foreground">
-              批量粘贴 BSC EOA 地址，定位历史上最早一笔成功、金额大于 0 的普通 BNB 入账，并识别已收录的 CEX 来源地址。
+              批量扫描 BSC EOA 地址收到的 CEX 热钱包
+              BNB，分别保留每个具体热钱包与接收地址之间的首次到账，并按相邻 20
+              分钟分组。
             </p>
 
             <div className="mt-8 grid grid-cols-3 gap-3">
               {[
-                ['01', '普通入账'],
-                ['02', '最早一笔'],
-                ['03', 'CEX 标签'],
+                ['01', 'CEX 入账'],
+                ['02', '按热钱包取首次'],
+                ['03', '20 分钟分组'],
               ].map(([number, label]) => (
                 <div key={number} className="border-l border-border pl-3">
                   <div className="font-mono text-xs text-primary">{number}</div>
@@ -425,7 +474,9 @@ export default function Home() {
             <Card className="h-[36rem] border border-border bg-card shadow-[0_24px_80px_rgba(10,18,35,0.08)] ring-0 lg:h-[calc(100vh-8rem)] lg:min-h-[36rem] lg:max-h-[48rem]">
               <CardHeader className="border-b border-border pb-4">
                 <CardTitle className="text-lg">输入地址</CardTitle>
-                <CardDescription>每行一个地址，也支持从文本中自动提取。最多 {maxAddresses} 个。</CardDescription>
+                <CardDescription>
+                  每行一个地址，也支持从文本中自动提取。最多 {maxAddresses} 个。
+                </CardDescription>
               </CardHeader>
               <CardContent className="flex min-h-0 flex-1 flex-col gap-4 pt-1">
                 <Textarea
@@ -439,12 +490,21 @@ export default function Home() {
                   spellCheck={false}
                 />
                 <div className="flex flex-wrap items-center justify-between gap-3">
-                  <p className={`text-xs leading-5 ${tooMany ? 'text-destructive' : 'text-muted-foreground'}`}>
-                    已识别 {addresses.length} 个有效地址{tooMany ? `，超过 ${maxAddresses} 个上限` : ''}
+                  <p
+                    className={`text-xs leading-5 ${tooMany ? 'text-destructive' : 'text-muted-foreground'}`}
+                  >
+                    已识别 {addresses.length} 个有效地址
+                    {tooMany ? `，超过 ${maxAddresses} 个上限` : ''}
                   </p>
                   <div className="flex items-center gap-2">
                     {(input || results.length > 0) && (
-                      <Button variant="ghost" size="lg" className="h-10" onClick={clearAll} disabled={loading}>
+                      <Button
+                        variant="ghost"
+                        size="lg"
+                        className="h-10"
+                        onClick={clearAll}
+                        disabled={loading}
+                      >
                         <Trash2 data-icon="inline-start" />
                         清空
                       </Button>
@@ -455,13 +515,20 @@ export default function Home() {
                       onClick={runLookup}
                       disabled={addresses.length === 0 || tooMany || loading}
                     >
-                      {loading ? <Spinner /> : <Search data-icon="inline-start" />}
+                      {loading ? (
+                        <Spinner />
+                      ) : (
+                        <Search data-icon="inline-start" />
+                      )}
                       {loading ? '查询中' : '开始查询'}
                     </Button>
                   </div>
                 </div>
                 {progress.total > 0 && (
-                  <div className="rounded-xl border border-border bg-secondary/45 p-4" aria-live="polite">
+                  <div
+                    className="rounded-xl border border-border bg-secondary/45 p-4"
+                    aria-live="polite"
+                  >
                     <Progress value={progressPercent}>
                       <ProgressLabel>
                         {loading
@@ -471,11 +538,13 @@ export default function Home() {
                             : '查询完成，包含失败项'}
                       </ProgressLabel>
                       <span className="ml-auto text-sm tabular-nums text-muted-foreground">
-                        {progress.processed}/{progress.total} · {progressPercent}%
+                        {progress.processed}/{progress.total} ·{' '}
+                        {progressPercent}%
                       </span>
                     </Progress>
                     <p className="mt-2 text-xs leading-5 text-muted-foreground">
-                      每批最多 {batchSize} 个地址，依次查询并统一汇总。查询期间请保持页面打开。
+                      每批最多 {batchSize}{' '}
+                      个地址，依次查询并统一汇总。查询期间请保持页面打开。
                     </p>
                   </div>
                 )}
@@ -483,7 +552,10 @@ export default function Home() {
             </Card>
 
             {error && (
-              <Alert variant="destructive" className="border-destructive/25 bg-red-50/70 px-4 py-3">
+              <Alert
+                variant="destructive"
+                className="border-destructive/25 bg-red-50/70 px-4 py-3"
+              >
                 <AlertCircle />
                 <AlertTitle>本次查询未完成</AlertTitle>
                 <AlertDescription>{error}</AlertDescription>
@@ -491,7 +563,10 @@ export default function Home() {
             )}
 
             {exportError && (
-              <Alert variant="destructive" className="border-destructive/25 bg-red-50/70 px-4 py-3">
+              <Alert
+                variant="destructive"
+                className="border-destructive/25 bg-red-50/70 px-4 py-3"
+              >
                 <AlertCircle />
                 <AlertTitle>Excel 导出失败</AlertTitle>
                 <AlertDescription>{exportError}</AlertDescription>
@@ -502,54 +577,66 @@ export default function Home() {
               <Alert className="border-amber-300 bg-amber-50 px-4 py-3 text-amber-900">
                 <AlertCircle />
                 <AlertTitle>部分地址查询失败</AlertTitle>
-                <AlertDescription>失败项不会被当作“无普通入账”，请稍后重试。</AlertDescription>
+                <AlertDescription>
+                  失败项不会被当作“无 CEX 入账”，请稍后重试。
+                </AlertDescription>
               </Alert>
             )}
           </div>
 
           <Card className="h-[36rem] min-w-0 border border-border bg-card ring-0 lg:h-[calc(100vh-8rem)] lg:min-h-[36rem] lg:max-h-[48rem]">
-              <CardHeader className="border-b border-border pb-4">
-                <div className="flex items-center justify-between gap-3">
-                  <div>
-                    <CardTitle>查询结果</CardTitle>
-                    <CardDescription className="mt-1">时间统一显示为北京时间（UTC+8）</CardDescription>
-                  </div>
-                  <div className="flex items-center gap-2">
-                    {results.length > 0 && (
-                      <Badge variant={complete ? 'secondary' : 'outline'}>
-                        {complete ? <CheckCircle2 className="size-3" /> : <AlertCircle className="size-3" />}
-                        {results.length} 个地址
-                      </Badge>
-                    )}
-                    <Button
-                      variant="outline"
-                      size="sm"
-                      onClick={exportExcel}
-                      disabled={loading || exporting || results.length === 0}
-                    >
-                      {exporting ? <Spinner /> : <Download data-icon="inline-start" />}
-                      {exporting ? '导出中' : '导出 Excel'}
-                    </Button>
-                  </div>
+            <CardHeader className="border-b border-border pb-4">
+              <div className="flex items-center justify-between gap-3">
+                <div>
+                  <CardTitle>查询结果</CardTitle>
+                  <CardDescription className="mt-1">
+                    时间统一显示为北京时间（UTC+8）
+                  </CardDescription>
                 </div>
-              </CardHeader>
+                <div className="flex items-center gap-2">
+                  {results.length > 0 && (
+                    <Badge variant={complete ? 'secondary' : 'outline'}>
+                      {complete ? (
+                        <CheckCircle2 className="size-3" />
+                      ) : (
+                        <AlertCircle className="size-3" />
+                      )}
+                      {results.length} 个地址 · {fundingRows.length} 条关系
+                    </Badge>
+                  )}
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={exportExcel}
+                    disabled={loading || exporting || results.length === 0}
+                  >
+                    {exporting ? (
+                      <Spinner />
+                    ) : (
+                      <Download data-icon="inline-start" />
+                    )}
+                    {exporting ? '导出中' : '导出 Excel'}
+                  </Button>
+                </div>
+              </div>
+            </CardHeader>
             <CardContent className="min-h-0 flex-1 px-0 pb-0">
-              <div
+              <section
                 className="h-full overflow-auto overscroll-contain [&_[data-slot=table-container]]:overflow-visible"
-                role="region"
                 aria-label="查询结果数据"
-                tabIndex={0}
               >
                 {results.length === 0 ? (
                   <div className="grid h-full min-h-44 place-items-center px-6 text-center">
                     <div>
                       <Search className="mx-auto mb-3 size-6 text-muted-foreground/50" />
                       <p className="text-sm font-medium">等待查询</p>
-                      <p className="mt-1 text-xs text-muted-foreground">结果将显示到账时间、BNB 金额、CEX 标签和交易哈希。</p>
+                      <p className="mt-1 text-xs text-muted-foreground">
+                        结果将显示每个具体 CEX 热钱包的首次到账关系和分组。
+                      </p>
                     </div>
                   </div>
                 ) : (
-                  <Table className="min-w-[1100px]">
+                  <Table className="min-w-[1260px]">
                     <TableHeader className="sticky top-0 z-10 bg-card shadow-[0_1px_0_0_var(--border)]">
                       <TableRow className="bg-secondary/45 hover:bg-secondary/45">
                         <TableHead className="pl-4">序号</TableHead>
@@ -559,78 +646,119 @@ export default function Home() {
                         <TableHead>组内地址数</TableHead>
                         <TableHead>对应序号</TableHead>
                         <TableHead>BNB 金额</TableHead>
-                        <TableHead>来源 CEX</TableHead>
+                        <TableHead>CEX 热钱包</TableHead>
+                        <TableHead>热钱包地址</TableHead>
                         <TableHead className="pr-4">交易哈希</TableHead>
                       </TableRow>
                     </TableHeader>
                     <TableBody>
-                      {results.map((result, index) => {
-                        const groupDetails = arrivalGroupDetails.get(result.address);
-                        return (
-                        <TableRow key={result.address}>
-                          <TableCell className="pl-4 text-sm font-medium">{index + 1}</TableCell>
-                          <TableCell className="font-mono text-xs" title={result.address}>
-                            {shortAddress(result.address)}
-                          </TableCell>
-                          {result.status === 'ok' ? (
-                            <>
-                              <TableCell>{formatTimestamp(result.timestamp)}</TableCell>
-                              <TableCell>
-                                {loading ? (
-                                  <Badge variant="outline">计算中</Badge>
-                                ) : groupDetails ? (
-                                  <Badge className="bg-primary/15 text-primary">
-                                    组别 {groupDetails.groupNumber}
-                                  </Badge>
-                                ) : (
-                                  <span className="text-sm text-muted-foreground">无</span>
-                                )}
-                              </TableCell>
-                              <TableCell>{loading || !groupDetails ? '无' : groupDetails.memberCount}</TableCell>
-                              <TableCell className="max-w-48 whitespace-normal text-xs leading-5">
-                                {loading || !groupDetails ? '无' : groupDetails.memberSequences.join('、')}
-                              </TableCell>
-                              <TableCell className="font-medium">{formatWei(result.amountWei)}</TableCell>
-                              <TableCell>
-                                {result.cex ? (
-                                  <Badge className="bg-primary/15 text-primary" title={result.sourceAddress}>
-                                    {result.cex.label}
-                                  </Badge>
-                                ) : (
-                                  <Badge variant="outline" title={result.sourceAddress}>未识别</Badge>
-                                )}
-                              </TableCell>
-                              <TableCell className="pr-4">
-                                <a
-                                  href={`https://bscscan.com/tx/${result.transactionHash}`}
-                                  target="_blank"
-                                  rel="noreferrer"
-                                  className="inline-flex items-center gap-1 font-mono text-xs text-muted-foreground underline-offset-4 hover:text-foreground hover:underline"
-                                  title={result.transactionHash}
+                      {results.flatMap((result, index) =>
+                        result.status === 'ok'
+                          ? result.fundings.map((funding) => {
+                              const id = relationId(
+                                result.address,
+                                funding.sourceAddress,
+                              );
+                              const groupDetails = arrivalGroupDetails.get(id);
+                              return (
+                                <TableRow key={id}>
+                                  <TableCell className="pl-4 text-sm font-medium">
+                                    {index + 1}
+                                  </TableCell>
+                                  <TableCell
+                                    className="font-mono text-xs"
+                                    title={result.address}
+                                  >
+                                    {shortAddress(result.address)}
+                                  </TableCell>
+                                  <TableCell>
+                                    {formatTimestamp(funding.timestamp)}
+                                  </TableCell>
+                                  <TableCell>
+                                    {loading ? (
+                                      <Badge variant="outline">计算中</Badge>
+                                    ) : groupDetails ? (
+                                      <Badge className="bg-primary/15 text-primary">
+                                        组别 {groupDetails.groupNumber}
+                                      </Badge>
+                                    ) : (
+                                      <span className="text-sm text-muted-foreground">
+                                        无
+                                      </span>
+                                    )}
+                                  </TableCell>
+                                  <TableCell>
+                                    {loading || !groupDetails
+                                      ? '无'
+                                      : groupDetails.memberCount}
+                                  </TableCell>
+                                  <TableCell className="max-w-48 whitespace-normal text-xs leading-5">
+                                    {loading || !groupDetails
+                                      ? '无'
+                                      : groupDetails.memberSequences.join('、')}
+                                  </TableCell>
+                                  <TableCell className="font-medium">
+                                    {formatWei(funding.amountWei)}
+                                  </TableCell>
+                                  <TableCell>
+                                    <Badge
+                                      className="bg-primary/15 text-primary"
+                                      title={funding.sourceAddress}
+                                    >
+                                      {funding.cex.label}
+                                    </Badge>
+                                  </TableCell>
+                                  <TableCell
+                                    className="font-mono text-xs"
+                                    title={funding.sourceAddress}
+                                  >
+                                    {shortAddress(funding.sourceAddress)}
+                                  </TableCell>
+                                  <TableCell className="pr-4">
+                                    <a
+                                      href={`https://bscscan.com/tx/${funding.transactionHash}`}
+                                      target="_blank"
+                                      rel="noreferrer"
+                                      className="inline-flex items-center gap-1 font-mono text-xs text-muted-foreground underline-offset-4 hover:text-foreground hover:underline"
+                                      title={funding.transactionHash}
+                                    >
+                                      {shortAddress(funding.transactionHash)}
+                                      <ArrowUpRight className="size-3" />
+                                    </a>
+                                  </TableCell>
+                                </TableRow>
+                              );
+                            })
+                          : [
+                              <TableRow key={result.address}>
+                                <TableCell className="pl-4 text-sm font-medium">
+                                  {index + 1}
+                                </TableCell>
+                                <TableCell
+                                  className="font-mono text-xs"
+                                  title={result.address}
                                 >
-                                  {shortAddress(result.transactionHash)}
-                                  <ArrowUpRight className="size-3" />
-                                </a>
-                              </TableCell>
-                            </>
-                          ) : (
-                            <TableCell colSpan={7} className="pr-4">
-                              <StatusMessage result={result} />
-                            </TableCell>
-                          )}
-                        </TableRow>
-                        );
-                      })}
+                                  {shortAddress(result.address)}
+                                </TableCell>
+                                <TableCell colSpan={8} className="pr-4">
+                                  <StatusMessage result={result} />
+                                </TableCell>
+                              </TableRow>,
+                            ],
+                      )}
                     </TableBody>
                   </Table>
                 )}
-              </div>
+              </section>
             </CardContent>
           </Card>
         </section>
 
         <footer className="mt-12 border-t border-border pt-5 text-xs leading-5 text-muted-foreground">
-          “首笔原生 BNB 到账”指最早一笔成功、金额大于 0 的普通链上交易；不包含内部交易。到账时间分组要求来源为同一家已识别 CEX（同一 CEX 的不同热钱包统一计算）、相邻到账间隔不超过 20 分钟且连续至少 2 个地址。CEX 标签采用精确地址匹配，未命中不代表一定不是交易所地址。
+          每条结果代表“具体 CEX 热钱包 → 接收地址 →
+          BNB”的首次成功普通转账，不包含内部交易。同一交易所的不同热钱包分别计算、绝不合并；同一热钱包下按首次到账时间排序，相邻间隔不超过
+          20 分钟且连续至少 2 个地址才形成分组。CEX
+          标签采用精确地址匹配，未命中不代表一定不是交易所地址。
         </footer>
       </div>
     </main>
