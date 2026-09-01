@@ -21,7 +21,11 @@ type QualifiedRun = {
   sourceAddress: string;
 };
 
-export function buildArrivalGroupMap(
+export type ArrivalGroup = QualifiedRun & {
+  groupNumber: number;
+};
+
+export function buildArrivalGroups(
   candidates: ArrivalGroupCandidate[],
   options: { maxGapSeconds?: number; minGroupSize?: number } = {},
 ) {
@@ -77,10 +81,21 @@ export function buildArrivalGroupMap(
       a.members[0].address.localeCompare(b.members[0].address),
   );
 
+  return qualifiedRuns.map((run, index) => ({
+    ...run,
+    groupNumber: index + 1,
+  }));
+}
+
+export function buildArrivalGroupMap(
+  candidates: ArrivalGroupCandidate[],
+  options: { maxGapSeconds?: number; minGroupSize?: number } = {},
+) {
   const groups = new Map<string, number>();
-  qualifiedRuns.forEach((run, index) => {
-    for (const member of run.members) groups.set(member.id, index + 1);
-  });
+  for (const group of buildArrivalGroups(candidates, options)) {
+    for (const member of group.members)
+      groups.set(member.id, group.groupNumber);
+  }
   return groups;
 }
 

@@ -1,6 +1,6 @@
 'use client';
 
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import type { SheetData } from 'write-excel-file/browser';
 import {
   AlertCircle,
@@ -35,6 +35,12 @@ import {
 } from '@/components/ui/table';
 import { Textarea } from '@/components/ui/textarea';
 import { buildArrivalGroupDetailsMap } from '@/lib/arrival-groups';
+import {
+  clearLookupCheckpoint,
+  loadLookupCheckpoint,
+  saveLookupCheckpoint,
+} from '@/lib/lookup-checkpoint';
+import { buildRemovalSuggestions } from '@/lib/removal-suggestions';
 
 type CexFunding = {
   timestamp: number;
@@ -72,9 +78,25 @@ type LookupProgress = {
   totalBatches: number;
 };
 
+type TableResultRow =
+  | {
+      kind: 'funding';
+      result: OkResult;
+      resultIndex: number;
+      funding: CexFunding;
+      fundingIndex: number;
+    }
+  | {
+      kind: 'status';
+      result: OtherResult;
+      resultIndex: number;
+    };
+
 const addressPattern = /0x[a-fA-F0-9]{40}/g;
-const maxAddresses = 300;
+const maxAddresses = 10_000;
 const batchSize = 20;
+const maxBatchAttempts = 3;
+const maxVisibleRows = 2_000;
 const emptyProgress: LookupProgress = {
   processed: 0,
   total: 0,
@@ -98,6 +120,43 @@ function shortAddress(value: string) {
 
 function relationId(address: string, sourceAddress: string) {
   return `${address.toLowerCase()}:${sourceAddress.toLowerCase()}`;
+}
+
+function wait(milliseconds: number) {
+  return new Promise((resolve) => window.setTimeout(resolve, milliseconds));
+}
+
+async function lookupBatch(batch: string[]) {
+  let lastError: unknown;
+  for (let attempt = 1; attempt <= maxBatchAttempts; attempt += 1) {
+    try {
+      const response = await fetch('/api/lookup', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ addresses: batch }),
+      });
+      const payload = (await response.json()) as ApiResponse;
+      if (!response.ok) {
+        throw new Error(
+          [payload.error, payload.detail].filter(Boolean).join('：') ||
+            `HTTP ${response.status}`,
+        );
+      }
+      const batchResults = payload.results ?? [];
+      if (batchResults.length !== batch.length) {
+        throw new Error('返回结果数量与本批地址数量不一致');
+      }
+      return { batchResults, complete: payload.complete };
+    } catch (cause) {
+      lastError = cause;
+      if (attempt < maxBatchAttempts) await wait(1_000 * attempt);
+    }
+  }
+  throw new Error(
+    `自动重试 ${maxBatchAttempts} 次后仍失败：${
+      lastError instanceof Error ? lastError.message : '查询失败，请稍后重试'
+    }`,
+  );
 }
 
 function formatWei(value: string) {
@@ -159,6 +218,8 @@ export default function Home() {
   const [progress, setProgress] = useState<LookupProgress>(emptyProgress);
   const [exporting, setExporting] = useState(false);
   const [exportError, setExportError] = useState('');
+  const [resumeAvailable, setResumeAvailable] = useState(false);
+  const [checkpointRestored, setCheckpointRestored] = useState(false);
 
   const addresses = useMemo(() => extractAddresses(input), [input]);
   const tooMany = addresses.length > maxAddresses;
@@ -192,29 +253,125 @@ export default function Home() {
       ),
     [fundingRows],
   );
+  const removalSuggestions = useMemo(
+    () =>
+      loading || !complete || results.length === 0
+        ? []
+        : buildRemovalSuggestions(
+            fundingRows.map(({ id, address, funding, sequence }) => ({
+              id,
+              address,
+              timestamp: funding.timestamp,
+              sourceAddress: funding.sourceAddress,
+              sequence,
+              exchange: funding.cex.exchange,
+              cexLabel: funding.cex.label,
+            })),
+          ),
+    [complete, fundingRows, loading, results.length],
+  );
+  const removalSuggestionByAddress = useMemo(
+    () =>
+      new Map(
+        removalSuggestions.map((suggestion) => [
+          suggestion.address,
+          suggestion,
+        ]),
+      ),
+    [removalSuggestions],
+  );
+  const tableRows = useMemo<TableResultRow[]>(() => {
+    const rows: TableResultRow[] = [];
+    results.forEach((result, resultIndex) => {
+      if (result.status === 'ok') {
+        result.fundings.forEach((funding, fundingIndex) => {
+          rows.push({
+            kind: 'funding',
+            result,
+            resultIndex,
+            funding,
+            fundingIndex,
+          });
+        });
+      } else {
+        rows.push({ kind: 'status', result, resultIndex });
+      }
+    });
+    return rows;
+  }, [results]);
+  const visibleTableRows = tableRows.slice(0, maxVisibleRows);
+
+  useEffect(() => {
+    let cancelled = false;
+    loadLookupCheckpoint<LookupResult>()
+      .then((checkpoint) => {
+        if (
+          cancelled ||
+          !checkpoint ||
+          checkpoint.version !== 1 ||
+          checkpoint.addresses.length === 0 ||
+          checkpoint.results.length > checkpoint.addresses.length
+        ) {
+          return;
+        }
+        setInput(checkpoint.addresses.join('\n'));
+        setResults(checkpoint.results);
+        const finished =
+          checkpoint.results.length === checkpoint.addresses.length;
+        setComplete(finished && checkpoint.complete);
+        setResumeAvailable(!finished);
+        setCheckpointRestored(true);
+        setProgress({
+          processed: checkpoint.results.length,
+          total: checkpoint.addresses.length,
+          batch: Math.min(
+            Math.floor(checkpoint.results.length / batchSize) + 1,
+            Math.ceil(checkpoint.addresses.length / batchSize),
+          ),
+          totalBatches: Math.ceil(checkpoint.addresses.length / batchSize),
+        });
+      })
+      .catch(() => undefined);
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   async function runLookup() {
     if (addresses.length === 0 || tooMany || loading) return;
     const queryAddresses = [...addresses];
     const totalBatches = Math.ceil(queryAddresses.length / batchSize);
+    const canResume =
+      resumeAvailable &&
+      results.length < queryAddresses.length &&
+      results.every(
+        (result, index) =>
+          result.address.toLowerCase() === queryAddresses[index],
+      );
+    const startingResults = canResume ? [...results] : [];
+    const startingOffset = startingResults.length;
     setLoading(true);
     setError('');
     setExportError('');
-    setResults([]);
-    setComplete(true);
+    setCheckpointRestored(false);
+    setResumeAvailable(false);
+    setResults(startingResults);
+    setComplete(false);
     setProgress({
-      processed: 0,
+      processed: startingOffset,
       total: queryAddresses.length,
-      batch: 1,
+      batch: Math.floor(startingOffset / batchSize) + 1,
       totalBatches,
     });
 
     try {
-      let aggregatedResults: LookupResult[] = [];
-      let allComplete = true;
+      let aggregatedResults: LookupResult[] = startingResults;
+      let allComplete = aggregatedResults.every(
+        (result) => result.status !== 'error',
+      );
 
       for (
-        let offset = 0;
+        let offset = startingOffset;
         offset < queryAddresses.length;
         offset += batchSize
       ) {
@@ -227,33 +384,9 @@ export default function Home() {
           totalBatches,
         });
 
-        let batchResults: LookupResult[];
-        try {
-          const response = await fetch('/api/lookup', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ addresses: batch }),
-          });
-          const payload = (await response.json()) as ApiResponse;
-          if (!response.ok) {
-            throw new Error(
-              [payload.error, payload.detail].filter(Boolean).join('：') ||
-                `HTTP ${response.status}`,
-            );
-          }
-          batchResults = payload.results ?? [];
-          if (batchResults.length !== batch.length) {
-            throw new Error('返回结果数量与本批地址数量不一致');
-          }
-          allComplete = allComplete && payload.complete;
-        } catch (cause) {
-          allComplete = false;
-          batchResults = batch.map((address) => ({
-            address,
-            status: 'error',
-            message: `第 ${batchNumber} 批查询失败：${cause instanceof Error ? cause.message : '查询失败，请稍后重试'}`,
-          }));
-        }
+        const { batchResults, complete: batchComplete } =
+          await lookupBatch(batch);
+        allComplete = allComplete && batchComplete;
 
         aggregatedResults = [...aggregatedResults, ...batchResults];
         setResults(aggregatedResults);
@@ -264,9 +397,23 @@ export default function Home() {
           batch: batchNumber,
           totalBatches,
         });
+        await saveLookupCheckpoint<LookupResult>({
+          version: 1,
+          addresses: queryAddresses,
+          results: aggregatedResults,
+          complete: allComplete,
+          savedAt: new Date().toISOString(),
+        }).catch(() => undefined);
       }
+      setResumeAvailable(false);
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : '查询失败，请稍后重试');
+      setComplete(false);
+      setResumeAvailable(true);
+      setError(
+        `当前批次未完成，已保存进度，可点击“继续查询”。${
+          cause instanceof Error ? cause.message : '查询失败，请稍后重试'
+        }`,
+      );
     } finally {
       setLoading(false);
     }
@@ -280,6 +427,9 @@ export default function Home() {
     setExportError('');
     setComplete(true);
     setProgress(emptyProgress);
+    setResumeAvailable(false);
+    setCheckpointRestored(false);
+    void clearLookupCheckpoint().catch(() => undefined);
   }
 
   function clearAll() {
@@ -289,10 +439,13 @@ export default function Home() {
     setExportError('');
     setComplete(true);
     setProgress(emptyProgress);
+    setResumeAvailable(false);
+    setCheckpointRestored(false);
+    void clearLookupCheckpoint().catch(() => undefined);
   }
 
   async function exportExcel() {
-    if (loading || exporting || results.length === 0) return;
+    if (loading || exporting || results.length === 0 || !complete) return;
     setExporting(true);
     setExportError('');
 
@@ -316,6 +469,7 @@ export default function Home() {
           header('到账时间分组'),
           header('组内地址数'),
           header('对应序号'),
+          header('是否建议删除'),
           header('BNB 金额（精确值）'),
           header('来源 CEX'),
           header('来源地址'),
@@ -347,6 +501,14 @@ export default function Home() {
                 : '无',
               groupDetails?.memberCount ?? '无',
               groupDetails?.memberSequences.join('、') ?? '无',
+              removalSuggestionByAddress.has(result.address.toLowerCase())
+                ? {
+                    value: '是',
+                    backgroundColor: '#FEE2E2',
+                    textColor: '#991B1B',
+                    fontWeight: 'bold' as const,
+                  }
+                : '否',
               formatWeiForExport(funding.amountWei),
               funding.cex.label,
               funding.sourceAddress,
@@ -370,6 +532,7 @@ export default function Home() {
           '无',
           null,
           '无',
+          '否',
           null,
           null,
           null,
@@ -377,34 +540,90 @@ export default function Home() {
           result.message,
         ]);
       });
+      const removalSheetData: SheetData = [
+        [
+          header('建议删除地址'),
+          header('原始输入序号'),
+          header('对应组别'),
+          header('原组内地址数'),
+          header('建议删除后组内剩余数'),
+          header('来源 CEX'),
+          header('CEX 热钱包标签'),
+          header('CEX 热钱包地址'),
+          header('建议原因'),
+        ],
+      ];
+      for (const suggestion of removalSuggestions) {
+        const groups = [...suggestion.groups].sort(
+          (a, b) => a.groupNumber - b.groupNumber,
+        );
+        removalSheetData.push([
+          suggestion.address,
+          suggestion.inputSequence,
+          groups.map((group) => `组别 ${group.groupNumber}`).join('；'),
+          groups.map((group) => group.originalMemberCount).join('；'),
+          groups.map((group) => group.remainingMemberCount).join('；'),
+          groups.map((group) => group.exchange).join('；'),
+          groups.map((group) => group.cexLabel).join('；'),
+          groups.map((group) => group.sourceAddress).join('；'),
+          groups.length > 1
+            ? `同时命中 ${groups.length} 个超限组，优先建议删除`
+            : '该组地址数超过 4 个，建议删除以降至最多 4 个',
+        ]);
+      }
       const timestamp = formatTimestamp(Math.floor(Date.now() / 1000))
         .replace(/\D/g, '')
         .slice(0, 14);
 
       await writeExcelFile(
-        sheetData,
+        [
+          {
+            data: sheetData,
+            sheet: '查询结果',
+            columns: [
+              { width: 8 },
+              { width: 44 },
+              { width: 16 },
+              { width: 23 },
+              { width: 18 },
+              { width: 14 },
+              { width: 28 },
+              { width: 16 },
+              { width: 24 },
+              { width: 24 },
+              { width: 44 },
+              { width: 68 },
+              { width: 42 },
+            ],
+            stickyRowsCount: 1,
+            stickyColumnsCount: 2,
+            orientation: 'landscape',
+            zoomScale: 0.85,
+          },
+          {
+            data: removalSheetData,
+            sheet: '建议删除地址',
+            columns: [
+              { width: 44 },
+              { width: 16 },
+              { width: 26 },
+              { width: 18 },
+              { width: 24 },
+              { width: 22 },
+              { width: 28 },
+              { width: 48 },
+              { width: 48 },
+            ],
+            stickyRowsCount: 1,
+            stickyColumnsCount: 1,
+            orientation: 'landscape',
+            zoomScale: 0.85,
+          },
+        ],
         {
-          sheet: '查询结果',
-          columns: [
-            { width: 8 },
-            { width: 44 },
-            { width: 16 },
-            { width: 23 },
-            { width: 18 },
-            { width: 14 },
-            { width: 28 },
-            { width: 24 },
-            { width: 24 },
-            { width: 44 },
-            { width: 68 },
-            { width: 42 },
-          ],
-          stickyRowsCount: 1,
-          stickyColumnsCount: 2,
-          orientation: 'landscape',
-          zoomScale: 0.85,
+          fontFamily: 'Aptos',
+          fontSize: 11,
         },
-        { fontFamily: 'Aptos', fontSize: 11 },
       ).toFile(`CEX热钱包首笔BNB到账关系-${timestamp}.xlsx`);
     } catch (cause) {
       setExportError(
@@ -520,7 +739,11 @@ export default function Home() {
                       ) : (
                         <Search data-icon="inline-start" />
                       )}
-                      {loading ? '查询中' : '开始查询'}
+                      {loading
+                        ? '查询中'
+                        : resumeAvailable
+                          ? '继续查询'
+                          : '开始查询'}
                     </Button>
                   </div>
                 </div>
@@ -533,9 +756,11 @@ export default function Home() {
                       <ProgressLabel>
                         {loading
                           ? `正在查询第 ${progress.batch}/${progress.totalBatches} 批`
-                          : complete
-                            ? '全部查询完成'
-                            : '查询完成，包含失败项'}
+                          : resumeAvailable
+                            ? '进度已保存，等待继续'
+                            : complete
+                              ? '全部查询完成'
+                              : '查询完成，包含失败项'}
                       </ProgressLabel>
                       <span className="ml-auto text-sm tabular-nums text-muted-foreground">
                         {progress.processed}/{progress.total} ·{' '}
@@ -544,7 +769,7 @@ export default function Home() {
                     </Progress>
                     <p className="mt-2 text-xs leading-5 text-muted-foreground">
                       每批最多 {batchSize}{' '}
-                      个地址，依次查询并统一汇总。查询期间请保持页面打开。
+                      个地址，失败自动重试并按批保存本地进度。查询期间请保持页面打开。
                     </p>
                   </div>
                 )}
@@ -573,12 +798,24 @@ export default function Home() {
               </Alert>
             )}
 
-            {results.length > 0 && !complete && (
+            {checkpointRestored && (
+              <Alert className="border-blue-200 bg-blue-50 px-4 py-3 text-blue-900">
+                <Database />
+                <AlertTitle>已恢复上次查询进度</AlertTitle>
+                <AlertDescription>
+                  已恢复 {results.length}/{addresses.length}{' '}
+                  个地址；未完成时可点击“继续查询”。
+                </AlertDescription>
+              </Alert>
+            )}
+
+            {results.length > 0 && !loading && !complete && (
               <Alert className="border-amber-300 bg-amber-50 px-4 py-3 text-amber-900">
                 <AlertCircle />
                 <AlertTitle>部分地址查询失败</AlertTitle>
                 <AlertDescription>
-                  失败项不会被当作“无 CEX 入账”，请稍后重试。
+                  失败项不会被当作“无 CEX
+                  入账”；查询完整前不生成删除建议，也不能导出最终 Excel。
                 </AlertDescription>
               </Alert>
             )}
@@ -591,6 +828,9 @@ export default function Home() {
                   <CardTitle>查询结果</CardTitle>
                   <CardDescription className="mt-1">
                     时间统一显示为北京时间（UTC+8）
+                    {tableRows.length > maxVisibleRows
+                      ? `；页面仅展示前 ${maxVisibleRows} 行，Excel 包含全部结果`
+                      : ''}
                   </CardDescription>
                 </div>
                 <div className="flex items-center gap-2">
@@ -604,11 +844,18 @@ export default function Home() {
                       {results.length} 个地址 · {fundingRows.length} 条关系
                     </Badge>
                   )}
+                  {complete && removalSuggestions.length > 0 && (
+                    <Badge className="bg-red-100 text-red-800">
+                      建议删除 {removalSuggestions.length} 个
+                    </Badge>
+                  )}
                   <Button
                     variant="outline"
                     size="sm"
                     onClick={exportExcel}
-                    disabled={loading || exporting || results.length === 0}
+                    disabled={
+                      loading || exporting || results.length === 0 || !complete
+                    }
                   >
                     {exporting ? (
                       <Spinner />
@@ -636,7 +883,7 @@ export default function Home() {
                     </div>
                   </div>
                 ) : (
-                  <Table className="min-w-[1260px]">
+                  <Table className="min-w-[1400px]">
                     <TableHeader className="sticky top-0 z-10 bg-card shadow-[0_1px_0_0_var(--border)]">
                       <TableRow className="bg-secondary/45 hover:bg-secondary/45">
                         <TableHead className="pl-4">序号</TableHead>
@@ -645,6 +892,7 @@ export default function Home() {
                         <TableHead>到账时间分组</TableHead>
                         <TableHead>组内地址数</TableHead>
                         <TableHead>对应序号</TableHead>
+                        <TableHead>是否建议删除</TableHead>
                         <TableHead>BNB 金额</TableHead>
                         <TableHead>CEX 热钱包</TableHead>
                         <TableHead>热钱包地址</TableHead>
@@ -652,100 +900,114 @@ export default function Home() {
                       </TableRow>
                     </TableHeader>
                     <TableBody>
-                      {results.flatMap((result, index) =>
-                        result.status === 'ok'
-                          ? result.fundings.map((funding, fundingIndex) => {
-                              const id = relationId(
-                                result.address,
-                                funding.sourceAddress,
-                              );
-                              const groupDetails = arrivalGroupDetails.get(id);
-                              return (
-                                <TableRow key={id}>
-                                  <TableCell className="pl-4 text-sm font-medium">
-                                    {index + 1}-{fundingIndex + 1}
-                                  </TableCell>
-                                  <TableCell
-                                    className="font-mono text-xs"
-                                    title={result.address}
-                                  >
-                                    {shortAddress(result.address)}
-                                  </TableCell>
-                                  <TableCell>
-                                    {formatTimestamp(funding.timestamp)}
-                                  </TableCell>
-                                  <TableCell>
-                                    {loading ? (
-                                      <Badge variant="outline">计算中</Badge>
-                                    ) : groupDetails ? (
-                                      <Badge className="bg-primary/15 text-primary">
-                                        组别 {groupDetails.groupNumber}
-                                      </Badge>
-                                    ) : (
-                                      <span className="text-sm text-muted-foreground">
-                                        无
-                                      </span>
-                                    )}
-                                  </TableCell>
-                                  <TableCell>
-                                    {loading || !groupDetails
-                                      ? '无'
-                                      : groupDetails.memberCount}
-                                  </TableCell>
-                                  <TableCell className="max-w-48 whitespace-normal text-xs leading-5">
-                                    {loading || !groupDetails
-                                      ? '无'
-                                      : groupDetails.memberSequences.join('、')}
-                                  </TableCell>
-                                  <TableCell className="font-medium">
-                                    {formatWei(funding.amountWei)}
-                                  </TableCell>
-                                  <TableCell>
-                                    <Badge
-                                      className="bg-primary/15 text-primary"
-                                      title={funding.sourceAddress}
-                                    >
-                                      {funding.cex.label}
-                                    </Badge>
-                                  </TableCell>
-                                  <TableCell
-                                    className="font-mono text-xs"
-                                    title={funding.sourceAddress}
-                                  >
-                                    {shortAddress(funding.sourceAddress)}
-                                  </TableCell>
-                                  <TableCell className="pr-4">
-                                    <a
-                                      href={`https://bscscan.com/tx/${funding.transactionHash}`}
-                                      target="_blank"
-                                      rel="noreferrer"
-                                      className="inline-flex items-center gap-1 font-mono text-xs text-muted-foreground underline-offset-4 hover:text-foreground hover:underline"
-                                      title={funding.transactionHash}
-                                    >
-                                      {shortAddress(funding.transactionHash)}
-                                      <ArrowUpRight className="size-3" />
-                                    </a>
-                                  </TableCell>
-                                </TableRow>
-                              );
-                            })
-                          : [
-                              <TableRow key={result.address}>
-                                <TableCell className="pl-4 text-sm font-medium">
-                                  {index + 1}
-                                </TableCell>
-                                <TableCell
-                                  className="font-mono text-xs"
-                                  title={result.address}
-                                >
-                                  {shortAddress(result.address)}
-                                </TableCell>
-                                <TableCell colSpan={8} className="pr-4">
-                                  <StatusMessage result={result} />
-                                </TableCell>
-                              </TableRow>,
-                            ],
-                      )}
+                      {visibleTableRows.map((row) => {
+                        if (row.kind === 'status') {
+                          return (
+                            <TableRow key={row.result.address}>
+                              <TableCell className="pl-4 text-sm font-medium">
+                                {row.resultIndex + 1}
+                              </TableCell>
+                              <TableCell
+                                className="font-mono text-xs"
+                                title={row.result.address}
+                              >
+                                {shortAddress(row.result.address)}
+                              </TableCell>
+                              <TableCell colSpan={9} className="pr-4">
+                                <StatusMessage result={row.result} />
+                              </TableCell>
+                            </TableRow>
+                          );
+                        }
+
+                        const id = relationId(
+                          row.result.address,
+                          row.funding.sourceAddress,
+                        );
+                        const groupDetails = arrivalGroupDetails.get(id);
+                        const suggested = removalSuggestionByAddress.has(
+                          row.result.address.toLowerCase(),
+                        );
+                        return (
+                          <TableRow key={id}>
+                            <TableCell className="pl-4 text-sm font-medium">
+                              {row.resultIndex + 1}-{row.fundingIndex + 1}
+                            </TableCell>
+                            <TableCell
+                              className="font-mono text-xs"
+                              title={row.result.address}
+                            >
+                              {shortAddress(row.result.address)}
+                            </TableCell>
+                            <TableCell>
+                              {formatTimestamp(row.funding.timestamp)}
+                            </TableCell>
+                            <TableCell>
+                              {loading ? (
+                                <Badge variant="outline">计算中</Badge>
+                              ) : groupDetails ? (
+                                <Badge className="bg-primary/15 text-primary">
+                                  组别 {groupDetails.groupNumber}
+                                </Badge>
+                              ) : (
+                                <span className="text-sm text-muted-foreground">
+                                  无
+                                </span>
+                              )}
+                            </TableCell>
+                            <TableCell>
+                              {loading || !groupDetails
+                                ? '无'
+                                : groupDetails.memberCount}
+                            </TableCell>
+                            <TableCell className="max-w-48 whitespace-normal text-xs leading-5">
+                              {loading || !groupDetails
+                                ? '无'
+                                : groupDetails.memberSequences.join('、')}
+                            </TableCell>
+                            <TableCell>
+                              {loading || !complete ? (
+                                <Badge variant="outline">待完整查询</Badge>
+                              ) : suggested ? (
+                                <Badge className="bg-red-100 text-red-800">
+                                  是
+                                </Badge>
+                              ) : (
+                                '否'
+                              )}
+                            </TableCell>
+                            <TableCell className="font-medium">
+                              {formatWei(row.funding.amountWei)}
+                            </TableCell>
+                            <TableCell>
+                              <Badge
+                                className="bg-primary/15 text-primary"
+                                title={row.funding.sourceAddress}
+                              >
+                                {row.funding.cex.label}
+                              </Badge>
+                            </TableCell>
+                            <TableCell
+                              className="font-mono text-xs"
+                              title={row.funding.sourceAddress}
+                            >
+                              {shortAddress(row.funding.sourceAddress)}
+                            </TableCell>
+                            <TableCell className="pr-4">
+                              <a
+                                href={`https://bscscan.com/tx/${row.funding.transactionHash}`}
+                                target="_blank"
+                                rel="noreferrer"
+                                className="inline-flex items-center gap-1 font-mono text-xs text-muted-foreground underline-offset-4 hover:text-foreground hover:underline"
+                                title={row.funding.transactionHash}
+                              >
+                                {shortAddress(row.funding.transactionHash)}
+                                <ArrowUpRight className="size-3" />
+                              </a>
+                            </TableCell>
+                          </TableRow>
+                        );
+                      })}
                     </TableBody>
                   </Table>
                 )}
@@ -757,8 +1019,9 @@ export default function Home() {
         <footer className="mt-12 border-t border-border pt-5 text-xs leading-5 text-muted-foreground">
           每条结果代表“具体 CEX 热钱包 → 接收地址 →
           BNB”的首次成功普通转账，不包含内部交易。同一交易所的不同热钱包分别计算、绝不合并；同一热钱包下按首次到账时间排序，相邻间隔不超过
-          20 分钟且连续至少 2 个地址才形成分组。CEX
-          标签采用精确地址匹配，未命中不代表一定不是交易所地址。
+          20 分钟且连续至少 2 个地址才形成分组。组内超过 4
+          个地址时产生删除建议，优先选择能同时减少多个超限组的地址，直到所有组最多剩
+          4 个。CEX 标签采用精确地址匹配，未命中不代表一定不是交易所地址。
         </footer>
       </div>
     </main>
