@@ -6,13 +6,13 @@ export type ArrivalGroupCandidate = {
 };
 
 export type IndexedArrivalGroupCandidate = ArrivalGroupCandidate & {
-  sequence: number;
+  sequence: string;
 };
 
 export type ArrivalGroupDetails = {
   groupNumber: number;
   memberCount: number;
-  memberSequences: number[];
+  memberSequences: string[];
 };
 
 type QualifiedRun = {
@@ -89,7 +89,7 @@ export function buildArrivalGroupDetailsMap(
   options: { maxGapSeconds?: number; minGroupSize?: number } = {},
 ) {
   const groupNumbers = buildArrivalGroupMap(candidates, options);
-  const sequencesByGroup = new Map<number, number[]>();
+  const sequencesByGroup = new Map<number, string[]>();
 
   for (const candidate of candidates) {
     const groupNumber = groupNumbers.get(candidate.id);
@@ -100,7 +100,7 @@ export function buildArrivalGroupDetailsMap(
   }
 
   for (const sequences of sequencesByGroup.values()) {
-    sequences.sort((a, b) => a - b);
+    sequences.sort((a, b) => a.localeCompare(b, undefined, { numeric: true }));
   }
 
   const details = new Map<string, ArrivalGroupDetails>();

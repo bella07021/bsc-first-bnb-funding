@@ -169,11 +169,11 @@ export default function Home() {
     () =>
       results.flatMap((result, index) =>
         result.status === 'ok'
-          ? result.fundings.map((funding) => ({
+          ? result.fundings.map((funding, fundingIndex) => ({
               id: relationId(result.address, funding.sourceAddress),
               address: result.address,
               funding,
-              sequence: index + 1,
+              sequence: `${index + 1}-${fundingIndex + 1}`,
             }))
           : [],
       ),
@@ -325,12 +325,12 @@ export default function Home() {
       ];
       results.forEach((result, index) => {
         if (result.status === 'ok') {
-          for (const funding of result.fundings) {
+          for (const [fundingIndex, funding] of result.fundings.entries()) {
             const groupDetails = arrivalGroupDetails.get(
               relationId(result.address, funding.sourceAddress),
             );
             sheetData.push([
-              index + 1,
+              `${index + 1}-${fundingIndex + 1}`,
               result.address,
               '成功',
               {
@@ -654,7 +654,7 @@ export default function Home() {
                     <TableBody>
                       {results.flatMap((result, index) =>
                         result.status === 'ok'
-                          ? result.fundings.map((funding) => {
+                          ? result.fundings.map((funding, fundingIndex) => {
                               const id = relationId(
                                 result.address,
                                 funding.sourceAddress,
@@ -663,7 +663,7 @@ export default function Home() {
                               return (
                                 <TableRow key={id}>
                                   <TableCell className="pl-4 text-sm font-medium">
-                                    {index + 1}
+                                    {index + 1}-{fundingIndex + 1}
                                   </TableCell>
                                   <TableCell
                                     className="font-mono text-xs"
