@@ -41,6 +41,7 @@ import {
   saveLookupCheckpoint,
 } from '@/lib/lookup-checkpoint';
 import { buildRemovalSuggestions } from '@/lib/removal-suggestions';
+import { buildRetainedAddressRows } from '@/lib/retained-addresses';
 
 type CexFunding = {
   timestamp: number;
@@ -571,6 +572,123 @@ export default function Home() {
             : '该组地址数超过 4 个，建议删除以降至最多 4 个',
         ]);
       }
+      const retainedAddressRecords = results.flatMap((result, index) => {
+        const inputSequence = index + 1;
+        if (result.status === 'ok' && result.fundings.length > 0) {
+          return result.fundings.map((funding, fundingIndex) => {
+            const groupDetails = arrivalGroupDetails.get(
+              relationId(result.address, funding.sourceAddress),
+            );
+            return {
+              address: result.address,
+              inputSequence,
+              sequence: `${inputSequence}-${fundingIndex + 1}`,
+              groupNumber: groupDetails?.groupNumber,
+              cexLabel: funding.cex.label,
+            };
+          });
+        }
+        return [
+          {
+            address: result.address,
+            inputSequence,
+            sequence: `${inputSequence}`,
+          },
+        ];
+      });
+      const retainedAddresses = buildRetainedAddressRows(
+        retainedAddressRecords,
+        removalSuggestions.map((suggestion) => suggestion.address),
+      );
+      const retainedSheetData: SheetData = [
+        [
+          {
+            value: '删除建议地址后的剩余地址去重清单',
+            columnSpan: 8,
+            height: 36,
+            backgroundColor: '#F4B183',
+            textColor: '#1F1F1F',
+            fontSize: 16,
+            fontWeight: 'bold',
+            align: 'center',
+            alignVertical: 'center',
+          },
+          null,
+          null,
+          null,
+          null,
+          null,
+          null,
+          null,
+        ],
+        [
+          {
+            value:
+              '处理口径：以第 2 个 Tab“建议删除地址”的地址列为删除名单；从第 1 个 Tab 的地址全集中剔除后，再按小写地址全局去重。“当前组内地址数”按删除后的剩余唯一地址重新统计，并与“原始到账分组”按相同顺序对应。',
+            columnSpan: 8,
+            height: 48,
+            backgroundColor: '#FFF2CC',
+            textColor: '#595959',
+            fontSize: 10,
+            borderColor: '#E6B800',
+            borderStyle: 'thin',
+            align: 'left',
+            alignVertical: 'center',
+            wrap: true,
+          },
+          null,
+          null,
+          null,
+          null,
+          null,
+          null,
+          null,
+        ],
+        [null, null, null, null, null, null, null, null],
+        [
+          { ...header('剩余地址'), height: 30, wrap: true },
+          { ...header('原始输入序号'), height: 30, wrap: true },
+          { ...header('查询记录数'), height: 30, wrap: true },
+          { ...header('对应序号'), height: 30, wrap: true },
+          { ...header('原始到账分组'), height: 30, wrap: true },
+          { ...header('当前组内地址数'), height: 30, wrap: true },
+          { ...header('来源 CEX 标签'), height: 30, wrap: true },
+          { ...header('处理说明'), height: 30, wrap: true },
+        ],
+      ];
+      for (const retained of retainedAddresses) {
+        retainedSheetData.push([
+          retained.address,
+          { value: retained.inputSequence, format: '0' },
+          { value: retained.queryRecordCount, format: '0' },
+          retained.sequences.join('；'),
+          retained.groups.length > 0
+            ? retained.groups
+                .map((group) => `组别 ${group.groupNumber}`)
+                .join('；')
+            : null,
+          retained.groups.length === 0
+            ? null
+            : {
+                value:
+                  retained.groups.length === 1
+                    ? retained.groups[0].remainingMemberCount
+                    : retained.groups
+                        .map((group) => group.remainingMemberCount)
+                        .join('；'),
+                backgroundColor: '#DDEBF7',
+                textColor: '#1F4E78',
+                fontWeight: 'bold',
+                align: 'center',
+              },
+          retained.cexLabels.join('；') || null,
+          {
+            value: '未出现在建议删除名单；已全局去重',
+            backgroundColor: '#E2F0D9',
+            textColor: '#548235',
+          },
+        ]);
+      }
       const timestamp = formatTimestamp(Math.floor(Date.now() / 1000))
         .replace(/\D/g, '')
         .slice(0, 14);
@@ -615,6 +733,24 @@ export default function Home() {
               { width: 48 },
             ],
             stickyRowsCount: 1,
+            stickyColumnsCount: 1,
+            orientation: 'landscape',
+            zoomScale: 0.85,
+          },
+          {
+            data: retainedSheetData,
+            sheet: '删除后剩余地址（去重）',
+            columns: [
+              { width: 44 },
+              { width: 16 },
+              { width: 14 },
+              { width: 28 },
+              { width: 28 },
+              { width: 22 },
+              { width: 36 },
+              { width: 48 },
+            ],
+            stickyRowsCount: 4,
             stickyColumnsCount: 1,
             orientation: 'landscape',
             zoomScale: 0.85,
