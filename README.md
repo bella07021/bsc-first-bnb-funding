@@ -1,6 +1,13 @@
-# CEX 热钱包首笔 BNB 到账关系与分组
+# BNB 链上中台工具
 
-公开网页：<https://bsc-first-bnb-funding.vercel.app>
+统一网页包含两个工具：
+
+- CEX 热钱包首笔 BNB 到账关系与分组
+- BNB 地址转账关系检查
+
+顶部标签可在两个工具之间切换，查询状态和结果互相隔离。
+
+现有公开网页：<https://bsc-first-bnb-funding.vercel.app>
 
 批量扫描 BSC 普通 EOA 地址收到的 CEX 热钱包普通原生 BNB 入账。每个“具体热钱包地址 → 接收地址 → BNB”关系分别保留第一次成功、金额大于 0 的到账，并显示：
 
@@ -25,3 +32,9 @@ npm run dev
 ## 部署
 
 `main` 分支已连接 Vercel，推送后自动构建部署。
+
+分支安排：
+
+- `main`：稳定线上版本
+- `codex/tool-address-transfer`：地址转账检查工具迁移分支
+- `codex/tool-hub`：统一入口集成分支；验证后再合并到 `main`
