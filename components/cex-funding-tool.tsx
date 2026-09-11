@@ -1,0 +1,1145 @@
+'use client';
+
+import { useEffect, useMemo, useState } from 'react';
+import type { SheetData } from 'write-excel-file/browser';
+import {
+  AlertCircle,
+  ArrowUpRight,
+  CheckCircle2,
+  Database,
+  Download,
+  Search,
+  ShieldCheck,
+  Trash2,
+} from 'lucide-react';
+
+import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
+import { Badge } from '@/components/ui/badge';
+import { Button } from '@/components/ui/button';
+import {
+  Card,
+  CardContent,
+  CardDescription,
+  CardHeader,
+  CardTitle,
+} from '@/components/ui/card';
+import { Spinner } from '@/components/ui/spinner';
+import { Progress, ProgressLabel } from '@/components/ui/progress';
+import {
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from '@/components/ui/table';
+import { Textarea } from '@/components/ui/textarea';
+import { buildArrivalGroupDetailsMap } from '@/lib/arrival-groups';
+import {
+  clearLookupCheckpoint,
+  loadLookupCheckpoint,
+  saveLookupCheckpoint,
+} from '@/lib/lookup-checkpoint';
+import { buildRemovalSuggestions } from '@/lib/removal-suggestions';
+import { buildRetainedAddressRows } from '@/lib/retained-addresses';
+
+type CexFunding = {
+  timestamp: number;
+  amountWei: string;
+  transactionHash: string;
+  sourceAddress: string;
+  cex: { exchange: string; label: string };
+};
+
+type OkResult = {
+  address: string;
+  status: 'ok';
+  fundings: CexFunding[];
+};
+
+type OtherResult = {
+  address: string;
+  status: 'no_inbound' | 'contract' | 'error';
+  message: string;
+};
+
+type LookupResult = OkResult | OtherResult;
+
+type ApiResponse = {
+  complete: boolean;
+  results: LookupResult[];
+  error?: string;
+  detail?: string;
+};
+
+type LookupProgress = {
+  processed: number;
+  total: number;
+  batch: number;
+  totalBatches: number;
+};
+
+type TableResultRow =
+  | {
+      kind: 'funding';
+      result: OkResult;
+      resultIndex: number;
+      funding: CexFunding;
+      fundingIndex: number;
+    }
+  | {
+      kind: 'status';
+      result: OtherResult;
+      resultIndex: number;
+    };
+
+const addressPattern = /0x[a-fA-F0-9]{40}/g;
+const maxAddresses = 10_000;
+const batchSize = 20;
+const maxBatchAttempts = 3;
+const maxVisibleRows = 2_000;
+const emptyProgress: LookupProgress = {
+  processed: 0,
+  total: 0,
+  batch: 0,
+  totalBatches: 0,
+};
+
+function extractAddresses(value: string) {
+  return [
+    ...new Set(
+      (value.match(addressPattern) ?? []).map((address) =>
+        address.toLowerCase(),
+      ),
+    ),
+  ];
+}
+
+function shortAddress(value: string) {
+  return `${value.slice(0, 8)}…${value.slice(-6)}`;
+}
+
+function relationId(address: string, sourceAddress: string) {
+  return `${address.toLowerCase()}:${sourceAddress.toLowerCase()}`;
+}
+
+function wait(milliseconds: number) {
+  return new Promise((resolve) => window.setTimeout(resolve, milliseconds));
+}
+
+async function lookupBatch(batch: string[]) {
+  let lastError: unknown;
+  for (let attempt = 1; attempt <= maxBatchAttempts; attempt += 1) {
+    try {
+      const response = await fetch('/api/lookup', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ addresses: batch }),
+      });
+      const payload = (await response.json()) as ApiResponse;
+      if (!response.ok) {
+        throw new Error(
+          [payload.error, payload.detail].filter(Boolean).join('：') ||
+            `HTTP ${response.status}`,
+        );
+      }
+      const batchResults = payload.results ?? [];
+      if (batchResults.length !== batch.length) {
+        throw new Error('返回结果数量与本批地址数量不一致');
+      }
+      return { batchResults, complete: payload.complete };
+    } catch (cause) {
+      lastError = cause;
+      if (attempt < maxBatchAttempts) await wait(1_000 * attempt);
+    }
+  }
+  throw new Error(
+    `自动重试 ${maxBatchAttempts} 次后仍失败：${
+      lastError instanceof Error ? lastError.message : '查询失败，请稍后重试'
+    }`,
+  );
+}
+
+function formatWei(value: string) {
+  const wei = BigInt(value);
+  const base = 10n ** 18n;
+  const whole = wei / base;
+  const fraction = (wei % base).toString().padStart(18, '0').replace(/0+$/, '');
+  const amount = fraction ? `${whole}.${fraction}` : `${whole}`;
+  return `${amount} BNB`;
+}
+
+function formatWeiForExport(value: string) {
+  return formatWei(value).replace(/ BNB$/, '');
+}
+
+function formatTimestamp(timestamp: number) {
+  return new Intl.DateTimeFormat('zh-CN', {
+    timeZone: 'Asia/Shanghai',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+    hour12: false,
+  })
+    .format(new Date(timestamp * 1000))
+    .replaceAll('/', '-');
+}
+
+function StatusMessage({ result }: { result: OtherResult }) {
+  const styles = {
+    no_inbound: 'bg-secondary text-muted-foreground',
+    contract: 'bg-amber-100 text-amber-800',
+    error: 'bg-red-50 text-red-700',
+  } as const;
+  const labels = {
+    no_inbound: '无 CEX 入账',
+    contract: '非普通 EOA',
+    error: '查询失败',
+  } as const;
+
+  return (
+    <div className="flex items-center gap-2">
+      <Badge className={styles[result.status]}>{labels[result.status]}</Badge>
+      <span className="max-w-[430px] whitespace-normal text-xs text-muted-foreground">
+        {result.message}
+      </span>
+    </div>
+  );
+}
+
+export default function CexFundingTool() {
+  const [input, setInput] = useState('');
+  const [results, setResults] = useState<LookupResult[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState('');
+  const [complete, setComplete] = useState(true);
+  const [progress, setProgress] = useState<LookupProgress>(emptyProgress);
+  const [exporting, setExporting] = useState(false);
+  const [exportError, setExportError] = useState('');
+  const [resumeAvailable, setResumeAvailable] = useState(false);
+  const [checkpointRestored, setCheckpointRestored] = useState(false);
+
+  const addresses = useMemo(() => extractAddresses(input), [input]);
+  const tooMany = addresses.length > maxAddresses;
+  const progressPercent = progress.total
+    ? Math.round((progress.processed / progress.total) * 100)
+    : 0;
+  const fundingRows = useMemo(
+    () =>
+      results.flatMap((result, index) =>
+        result.status === 'ok'
+          ? result.fundings.map((funding, fundingIndex) => ({
+              id: relationId(result.address, funding.sourceAddress),
+              address: result.address,
+              funding,
+              sequence: `${index + 1}-${fundingIndex + 1}`,
+            }))
+          : [],
+      ),
+    [results],
+  );
+  const arrivalGroupDetails = useMemo(
+    () =>
+      buildArrivalGroupDetailsMap(
+        fundingRows.map(({ id, address, funding, sequence }) => ({
+          id,
+          address,
+          timestamp: funding.timestamp,
+          sourceAddress: funding.sourceAddress,
+          sequence,
+        })),
+      ),
+    [fundingRows],
+  );
+  const removalSuggestions = useMemo(
+    () =>
+      loading || !complete || results.length === 0
+        ? []
+        : buildRemovalSuggestions(
+            fundingRows.map(({ id, address, funding, sequence }) => ({
+              id,
+              address,
+              timestamp: funding.timestamp,
+              sourceAddress: funding.sourceAddress,
+              sequence,
+              exchange: funding.cex.exchange,
+              cexLabel: funding.cex.label,
+            })),
+          ),
+    [complete, fundingRows, loading, results.length],
+  );
+  const removalSuggestionByAddress = useMemo(
+    () =>
+      new Map(
+        removalSuggestions.map((suggestion) => [
+          suggestion.address,
+          suggestion,
+        ]),
+      ),
+    [removalSuggestions],
+  );
+  const tableRows = useMemo<TableResultRow[]>(() => {
+    const rows: TableResultRow[] = [];
+    results.forEach((result, resultIndex) => {
+      if (result.status === 'ok') {
+        result.fundings.forEach((funding, fundingIndex) => {
+          rows.push({
+            kind: 'funding',
+            result,
+            resultIndex,
+            funding,
+            fundingIndex,
+          });
+        });
+      } else {
+        rows.push({ kind: 'status', result, resultIndex });
+      }
+    });
+    return rows;
+  }, [results]);
+  const visibleTableRows = tableRows.slice(0, maxVisibleRows);
+
+  useEffect(() => {
+    let cancelled = false;
+    loadLookupCheckpoint<LookupResult>()
+      .then((checkpoint) => {
+        if (
+          cancelled ||
+          !checkpoint ||
+          checkpoint.version !== 1 ||
+          checkpoint.addresses.length === 0 ||
+          checkpoint.results.length > checkpoint.addresses.length
+        ) {
+          return;
+        }
+        setInput(checkpoint.addresses.join('\n'));
+        setResults(checkpoint.results);
+        const finished =
+          checkpoint.results.length === checkpoint.addresses.length;
+        setComplete(finished && checkpoint.complete);
+        setResumeAvailable(!finished);
+        setCheckpointRestored(true);
+        setProgress({
+          processed: checkpoint.results.length,
+          total: checkpoint.addresses.length,
+          batch: Math.min(
+            Math.floor(checkpoint.results.length / batchSize) + 1,
+            Math.ceil(checkpoint.addresses.length / batchSize),
+          ),
+          totalBatches: Math.ceil(checkpoint.addresses.length / batchSize),
+        });
+      })
+      .catch(() => undefined);
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  async function runLookup() {
+    if (addresses.length === 0 || tooMany || loading) return;
+    const queryAddresses = [...addresses];
+    const totalBatches = Math.ceil(queryAddresses.length / batchSize);
+    const canResume =
+      resumeAvailable &&
+      results.length < queryAddresses.length &&
+      results.every(
+        (result, index) =>
+          result.address.toLowerCase() === queryAddresses[index],
+      );
+    const startingResults = canResume ? [...results] : [];
+    const startingOffset = startingResults.length;
+    setLoading(true);
+    setError('');
+    setExportError('');
+    setCheckpointRestored(false);
+    setResumeAvailable(false);
+    setResults(startingResults);
+    setComplete(false);
+    setProgress({
+      processed: startingOffset,
+      total: queryAddresses.length,
+      batch: Math.floor(startingOffset / batchSize) + 1,
+      totalBatches,
+    });
+
+    try {
+      let aggregatedResults: LookupResult[] = startingResults;
+      let allComplete = aggregatedResults.every(
+        (result) => result.status !== 'error',
+      );
+
+      for (
+        let offset = startingOffset;
+        offset < queryAddresses.length;
+        offset += batchSize
+      ) {
+        const batchNumber = Math.floor(offset / batchSize) + 1;
+        const batch = queryAddresses.slice(offset, offset + batchSize);
+        setProgress({
+          processed: offset,
+          total: queryAddresses.length,
+          batch: batchNumber,
+          totalBatches,
+        });
+
+        const { batchResults, complete: batchComplete } =
+          await lookupBatch(batch);
+        allComplete = allComplete && batchComplete;
+
+        aggregatedResults = [...aggregatedResults, ...batchResults];
+        setResults(aggregatedResults);
+        setComplete(allComplete);
+        setProgress({
+          processed: Math.min(offset + batch.length, queryAddresses.length),
+          total: queryAddresses.length,
+          batch: batchNumber,
+          totalBatches,
+        });
+        await saveLookupCheckpoint<LookupResult>({
+          version: 1,
+          addresses: queryAddresses,
+          results: aggregatedResults,
+          complete: allComplete,
+          savedAt: new Date().toISOString(),
+        }).catch(() => undefined);
+      }
+      setResumeAvailable(false);
+    } catch (cause) {
+      setComplete(false);
+      setResumeAvailable(true);
+      setError(
+        `当前批次未完成，已保存进度，可点击“继续查询”。${
+          cause instanceof Error ? cause.message : '查询失败，请稍后重试'
+        }`,
+      );
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  function updateInput(value: string) {
+    if (loading) return;
+    setInput(value);
+    setResults([]);
+    setError('');
+    setExportError('');
+    setComplete(true);
+    setProgress(emptyProgress);
+    setResumeAvailable(false);
+    setCheckpointRestored(false);
+    void clearLookupCheckpoint().catch(() => undefined);
+  }
+
+  function clearAll() {
+    setInput('');
+    setResults([]);
+    setError('');
+    setExportError('');
+    setComplete(true);
+    setProgress(emptyProgress);
+    setResumeAvailable(false);
+    setCheckpointRestored(false);
+    void clearLookupCheckpoint().catch(() => undefined);
+  }
+
+  async function exportExcel() {
+    if (loading || exporting || results.length === 0 || !complete) return;
+    setExporting(true);
+    setExportError('');
+
+    try {
+      const { default: writeExcelFile } =
+        await import('write-excel-file/browser');
+      const header = (value: string) => ({
+        value,
+        fontWeight: 'bold' as const,
+        backgroundColor: '#F3BA2F',
+        textColor: '#152038',
+        align: 'center' as const,
+        alignVertical: 'center' as const,
+      });
+      const sheetData: SheetData = [
+        [
+          header('序号'),
+          header('地址'),
+          header('查询状态'),
+          header('到账时间（UTC+8）'),
+          header('到账时间分组'),
+          header('组内地址数'),
+          header('对应序号'),
+          header('是否建议删除'),
+          header('BNB 金额（精确值）'),
+          header('来源 CEX'),
+          header('来源地址'),
+          header('交易哈希'),
+          header('备注'),
+        ],
+      ];
+      results.forEach((result, index) => {
+        if (result.status === 'ok') {
+          for (const [fundingIndex, funding] of result.fundings.entries()) {
+            const groupDetails = arrivalGroupDetails.get(
+              relationId(result.address, funding.sourceAddress),
+            );
+            sheetData.push([
+              `${index + 1}-${fundingIndex + 1}`,
+              result.address,
+              '成功',
+              {
+                value: new Date((funding.timestamp + 8 * 60 * 60) * 1000),
+                type: Date,
+                format: 'yyyy-mm-dd hh:mm:ss',
+              },
+              groupDetails
+                ? {
+                    value: `组别 ${groupDetails.groupNumber}`,
+                    backgroundColor: '#FFF4CC',
+                    fontWeight: 'bold' as const,
+                  }
+                : '无',
+              groupDetails?.memberCount ?? '无',
+              groupDetails?.memberSequences.join('、') ?? '无',
+              removalSuggestionByAddress.has(result.address.toLowerCase())
+                ? {
+                    value: '是',
+                    backgroundColor: '#FEE2E2',
+                    textColor: '#991B1B',
+                    fontWeight: 'bold' as const,
+                  }
+                : '否',
+              formatWeiForExport(funding.amountWei),
+              funding.cex.label,
+              funding.sourceAddress,
+              funding.transactionHash,
+              '',
+            ]);
+          }
+          return;
+        }
+
+        const statusLabel = {
+          no_inbound: '无 CEX 入账',
+          contract: '非普通 EOA',
+          error: '查询失败',
+        }[result.status];
+        sheetData.push([
+          index + 1,
+          result.address,
+          statusLabel,
+          null,
+          '无',
+          null,
+          '无',
+          '否',
+          null,
+          null,
+          null,
+          null,
+          result.message,
+        ]);
+      });
+      const removalSheetData: SheetData = [
+        [
+          header('建议删除地址'),
+          header('原始输入序号'),
+          header('对应组别'),
+          header('原组内地址数'),
+          header('建议删除后组内剩余数'),
+          header('来源 CEX'),
+          header('CEX 热钱包标签'),
+          header('CEX 热钱包地址'),
+          header('建议原因'),
+        ],
+      ];
+      for (const suggestion of removalSuggestions) {
+        const groups = [...suggestion.groups].sort(
+          (a, b) => a.groupNumber - b.groupNumber,
+        );
+        removalSheetData.push([
+          suggestion.address,
+          suggestion.inputSequence,
+          groups.map((group) => `组别 ${group.groupNumber}`).join('；'),
+          groups.map((group) => group.originalMemberCount).join('；'),
+          groups.map((group) => group.remainingMemberCount).join('；'),
+          groups.map((group) => group.exchange).join('；'),
+          groups.map((group) => group.cexLabel).join('；'),
+          groups.map((group) => group.sourceAddress).join('；'),
+          groups.length > 1
+            ? `同时命中 ${groups.length} 个超限组，优先建议删除`
+            : '该组地址数超过 4 个，建议删除以降至最多 4 个',
+        ]);
+      }
+      const retainedAddressRecords = results.flatMap((result, index) => {
+        const inputSequence = index + 1;
+        if (result.status === 'ok' && result.fundings.length > 0) {
+          return result.fundings.map((funding, fundingIndex) => {
+            const groupDetails = arrivalGroupDetails.get(
+              relationId(result.address, funding.sourceAddress),
+            );
+            return {
+              address: result.address,
+              inputSequence,
+              sequence: `${inputSequence}-${fundingIndex + 1}`,
+              groupNumber: groupDetails?.groupNumber,
+              cexLabel: funding.cex.label,
+            };
+          });
+        }
+        return [
+          {
+            address: result.address,
+            inputSequence,
+            sequence: `${inputSequence}`,
+          },
+        ];
+      });
+      const retainedAddresses = buildRetainedAddressRows(
+        retainedAddressRecords,
+        removalSuggestions.map((suggestion) => suggestion.address),
+      );
+      const retainedSheetData: SheetData = [
+        [
+          {
+            value: '删除建议地址后的剩余地址去重清单',
+            columnSpan: 8,
+            height: 36,
+            backgroundColor: '#F4B183',
+            textColor: '#1F1F1F',
+            fontSize: 16,
+            fontWeight: 'bold',
+            align: 'center',
+            alignVertical: 'center',
+          },
+          null,
+          null,
+          null,
+          null,
+          null,
+          null,
+          null,
+        ],
+        [
+          {
+            value:
+              '处理口径：以第 2 个 Tab“建议删除地址”的地址列为删除名单；从第 1 个 Tab 的地址全集中剔除后，再按小写地址全局去重。“当前组内地址数”按删除后的剩余唯一地址重新统计，并与“原始到账分组”按相同顺序对应。',
+            columnSpan: 8,
+            height: 48,
+            backgroundColor: '#FFF2CC',
+            textColor: '#595959',
+            fontSize: 10,
+            borderColor: '#E6B800',
+            borderStyle: 'thin',
+            align: 'left',
+            alignVertical: 'center',
+            wrap: true,
+          },
+          null,
+          null,
+          null,
+          null,
+          null,
+          null,
+          null,
+        ],
+        [null, null, null, null, null, null, null, null],
+        [
+          { ...header('剩余地址'), height: 30, wrap: true },
+          { ...header('原始输入序号'), height: 30, wrap: true },
+          { ...header('查询记录数'), height: 30, wrap: true },
+          { ...header('对应序号'), height: 30, wrap: true },
+          { ...header('原始到账分组'), height: 30, wrap: true },
+          { ...header('当前组内地址数'), height: 30, wrap: true },
+          { ...header('来源 CEX 标签'), height: 30, wrap: true },
+          { ...header('处理说明'), height: 30, wrap: true },
+        ],
+      ];
+      for (const retained of retainedAddresses) {
+        retainedSheetData.push([
+          retained.address,
+          { value: retained.inputSequence, format: '0' },
+          { value: retained.queryRecordCount, format: '0' },
+          retained.sequences.join('；'),
+          retained.groups.length > 0
+            ? retained.groups
+                .map((group) => `组别 ${group.groupNumber}`)
+                .join('；')
+            : null,
+          retained.groups.length === 0
+            ? null
+            : {
+                value:
+                  retained.groups.length === 1
+                    ? retained.groups[0].remainingMemberCount
+                    : retained.groups
+                        .map((group) => group.remainingMemberCount)
+                        .join('；'),
+                backgroundColor: '#DDEBF7',
+                textColor: '#1F4E78',
+                fontWeight: 'bold',
+                align: 'center',
+              },
+          retained.cexLabels.join('；') || null,
+          {
+            value: '未出现在建议删除名单；已全局去重',
+            backgroundColor: '#E2F0D9',
+            textColor: '#548235',
+          },
+        ]);
+      }
+      const timestamp = formatTimestamp(Math.floor(Date.now() / 1000))
+        .replace(/\D/g, '')
+        .slice(0, 14);
+
+      await writeExcelFile(
+        [
+          {
+            data: sheetData,
+            sheet: '查询结果',
+            columns: [
+              { width: 8 },
+              { width: 44 },
+              { width: 16 },
+              { width: 23 },
+              { width: 18 },
+              { width: 14 },
+              { width: 28 },
+              { width: 16 },
+              { width: 24 },
+              { width: 24 },
+              { width: 44 },
+              { width: 68 },
+              { width: 42 },
+            ],
+            stickyRowsCount: 1,
+            stickyColumnsCount: 2,
+            orientation: 'landscape',
+            zoomScale: 0.85,
+          },
+          {
+            data: removalSheetData,
+            sheet: '建议删除地址',
+            columns: [
+              { width: 44 },
+              { width: 16 },
+              { width: 26 },
+              { width: 18 },
+              { width: 24 },
+              { width: 22 },
+              { width: 28 },
+              { width: 48 },
+              { width: 48 },
+            ],
+            stickyRowsCount: 1,
+            stickyColumnsCount: 1,
+            orientation: 'landscape',
+            zoomScale: 0.85,
+          },
+          {
+            data: retainedSheetData,
+            sheet: '删除后剩余地址（去重）',
+            columns: [
+              { width: 44 },
+              { width: 16 },
+              { width: 14 },
+              { width: 28 },
+              { width: 28 },
+              { width: 22 },
+              { width: 36 },
+              { width: 48 },
+            ],
+            stickyRowsCount: 4,
+            stickyColumnsCount: 1,
+            orientation: 'landscape',
+            zoomScale: 0.85,
+          },
+        ],
+        {
+          fontFamily: 'Aptos',
+          fontSize: 11,
+        },
+      ).toFile(`CEX热钱包首笔BNB到账关系-${timestamp}.xlsx`);
+    } catch (cause) {
+      setExportError(
+        cause instanceof Error ? cause.message : '生成 Excel 文件失败',
+      );
+    } finally {
+      setExporting(false);
+    }
+  }
+
+  return (
+    <main className="min-h-screen bg-background text-foreground">
+      <div className="mx-auto w-full max-w-[1580px] px-5 py-8 sm:px-8 lg:py-10">
+        <section className="mb-8">
+          <div className="pt-2">
+            <div className="mb-5 inline-flex items-center gap-2 rounded-full border border-border bg-card px-3 py-1.5 text-xs text-muted-foreground shadow-sm">
+              <ShieldCheck className="size-3.5 text-primary" />
+              仅查询来自已识别 CEX 热钱包的普通原生 BNB 入账
+            </div>
+            <h1 className="max-w-xl text-balance text-4xl font-semibold tracking-[-0.045em] sm:text-5xl sm:leading-[1.08]">
+              CEX 热钱包首笔 BNB
+              <span className="block text-primary">到账关系与分组</span>
+            </h1>
+            <p className="mt-5 max-w-lg text-pretty text-base leading-7 text-muted-foreground">
+              批量扫描 BSC EOA 地址收到的 CEX 热钱包
+              BNB，分别保留每个具体热钱包与接收地址之间的首次到账，并按相邻 20
+              分钟分组。
+            </p>
+
+            <div className="mt-8 grid grid-cols-3 gap-3">
+              {[
+                ['01', 'CEX 入账'],
+                ['02', '按热钱包取首次'],
+                ['03', '20 分钟分组'],
+              ].map(([number, label]) => (
+                <div key={number} className="border-l border-border pl-3">
+                  <div className="font-mono text-xs text-primary">{number}</div>
+                  <div className="mt-1 text-sm font-medium">{label}</div>
+                </div>
+              ))}
+            </div>
+          </div>
+        </section>
+
+        <section className="grid items-start gap-5 lg:grid-cols-[minmax(320px,0.72fr)_minmax(0,1.65fr)]">
+          <div className="min-w-0 space-y-5">
+            <Card className="h-[36rem] border border-border bg-card shadow-[0_24px_80px_rgba(10,18,35,0.08)] ring-0 lg:h-[calc(100vh-8rem)] lg:min-h-[36rem] lg:max-h-[48rem]">
+              <CardHeader className="border-b border-border pb-4">
+                <CardTitle className="text-lg">输入地址</CardTitle>
+                <CardDescription>
+                  每行一个地址，也支持从文本中自动提取。最多 {maxAddresses} 个。
+                </CardDescription>
+              </CardHeader>
+              <CardContent className="flex min-h-0 flex-1 flex-col gap-4 pt-1">
+                <Textarea
+                  value={input}
+                  onChange={(event) => updateInput(event.target.value)}
+                  aria-label="BSC EOA 地址列表"
+                  aria-invalid={tooMany}
+                  disabled={loading}
+                  className="min-h-0 flex-1 resize-none overflow-y-auto overscroll-contain border-border bg-secondary/45 p-4 font-mono text-sm leading-6 [field-sizing:fixed] focus-visible:border-primary focus-visible:ring-primary/20"
+                  placeholder={'0x1234...\n0xabcd...'}
+                  spellCheck={false}
+                />
+                <div className="flex flex-wrap items-center justify-between gap-3">
+                  <p
+                    className={`text-xs leading-5 ${tooMany ? 'text-destructive' : 'text-muted-foreground'}`}
+                  >
+                    已识别 {addresses.length} 个有效地址
+                    {tooMany ? `，超过 ${maxAddresses} 个上限` : ''}
+                  </p>
+                  <div className="flex items-center gap-2">
+                    {(input || results.length > 0) && (
+                      <Button
+                        variant="ghost"
+                        size="lg"
+                        className="h-10"
+                        onClick={clearAll}
+                        disabled={loading}
+                      >
+                        <Trash2 data-icon="inline-start" />
+                        清空
+                      </Button>
+                    )}
+                    <Button
+                      size="lg"
+                      className="h-10 min-w-28 rounded-xl bg-primary px-4 text-primary-foreground hover:bg-primary/85"
+                      onClick={runLookup}
+                      disabled={addresses.length === 0 || tooMany || loading}
+                    >
+                      {loading ? (
+                        <Spinner />
+                      ) : (
+                        <Search data-icon="inline-start" />
+                      )}
+                      {loading
+                        ? '查询中'
+                        : resumeAvailable
+                          ? '继续查询'
+                          : '开始查询'}
+                    </Button>
+                  </div>
+                </div>
+                {progress.total > 0 && (
+                  <div
+                    className="rounded-xl border border-border bg-secondary/45 p-4"
+                    aria-live="polite"
+                  >
+                    <Progress value={progressPercent}>
+                      <ProgressLabel>
+                        {loading
+                          ? `正在查询第 ${progress.batch}/${progress.totalBatches} 批`
+                          : resumeAvailable
+                            ? '进度已保存，等待继续'
+                            : complete
+                              ? '全部查询完成'
+                              : '查询完成，包含失败项'}
+                      </ProgressLabel>
+                      <span className="ml-auto text-sm tabular-nums text-muted-foreground">
+                        {progress.processed}/{progress.total} ·{' '}
+                        {progressPercent}%
+                      </span>
+                    </Progress>
+                    <p className="mt-2 text-xs leading-5 text-muted-foreground">
+                      每批最多 {batchSize}{' '}
+                      个地址，失败自动重试并按批保存本地进度。查询期间请保持页面打开。
+                    </p>
+                  </div>
+                )}
+              </CardContent>
+            </Card>
+
+            {error && (
+              <Alert
+                variant="destructive"
+                className="border-destructive/25 bg-red-50/70 px-4 py-3"
+              >
+                <AlertCircle />
+                <AlertTitle>本次查询未完成</AlertTitle>
+                <AlertDescription>{error}</AlertDescription>
+              </Alert>
+            )}
+
+            {exportError && (
+              <Alert
+                variant="destructive"
+                className="border-destructive/25 bg-red-50/70 px-4 py-3"
+              >
+                <AlertCircle />
+                <AlertTitle>Excel 导出失败</AlertTitle>
+                <AlertDescription>{exportError}</AlertDescription>
+              </Alert>
+            )}
+
+            {checkpointRestored && (
+              <Alert className="border-blue-200 bg-blue-50 px-4 py-3 text-blue-900">
+                <Database />
+                <AlertTitle>已恢复上次查询进度</AlertTitle>
+                <AlertDescription>
+                  已恢复 {results.length}/{addresses.length}{' '}
+                  个地址；未完成时可点击“继续查询”。
+                </AlertDescription>
+              </Alert>
+            )}
+
+            {results.length > 0 && !loading && !complete && (
+              <Alert className="border-amber-300 bg-amber-50 px-4 py-3 text-amber-900">
+                <AlertCircle />
+                <AlertTitle>部分地址查询失败</AlertTitle>
+                <AlertDescription>
+                  失败项不会被当作“无 CEX
+                  入账”；查询完整前不生成删除建议，也不能导出最终 Excel。
+                </AlertDescription>
+              </Alert>
+            )}
+          </div>
+
+          <Card className="h-[36rem] min-w-0 border border-border bg-card ring-0 lg:h-[calc(100vh-8rem)] lg:min-h-[36rem] lg:max-h-[48rem]">
+            <CardHeader className="border-b border-border pb-4">
+              <div className="flex items-center justify-between gap-3">
+                <div>
+                  <CardTitle>查询结果</CardTitle>
+                  <CardDescription className="mt-1">
+                    时间统一显示为北京时间（UTC+8）
+                    {tableRows.length > maxVisibleRows
+                      ? `；页面仅展示前 ${maxVisibleRows} 行，Excel 包含全部结果`
+                      : ''}
+                  </CardDescription>
+                </div>
+                <div className="flex items-center gap-2">
+                  {results.length > 0 && (
+                    <Badge variant={complete ? 'secondary' : 'outline'}>
+                      {complete ? (
+                        <CheckCircle2 className="size-3" />
+                      ) : (
+                        <AlertCircle className="size-3" />
+                      )}
+                      {results.length} 个地址 · {fundingRows.length} 条关系
+                    </Badge>
+                  )}
+                  {complete && removalSuggestions.length > 0 && (
+                    <Badge className="bg-red-100 text-red-800">
+                      建议删除 {removalSuggestions.length} 个
+                    </Badge>
+                  )}
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={exportExcel}
+                    disabled={
+                      loading || exporting || results.length === 0 || !complete
+                    }
+                  >
+                    {exporting ? (
+                      <Spinner />
+                    ) : (
+                      <Download data-icon="inline-start" />
+                    )}
+                    {exporting ? '导出中' : '导出 Excel'}
+                  </Button>
+                </div>
+              </div>
+            </CardHeader>
+            <CardContent className="min-h-0 flex-1 px-0 pb-0">
+              <section
+                className="h-full overflow-auto overscroll-contain [&_[data-slot=table-container]]:overflow-visible"
+                aria-label="查询结果数据"
+              >
+                {results.length === 0 ? (
+                  <div className="grid h-full min-h-44 place-items-center px-6 text-center">
+                    <div>
+                      <Search className="mx-auto mb-3 size-6 text-muted-foreground/50" />
+                      <p className="text-sm font-medium">等待查询</p>
+                      <p className="mt-1 text-xs text-muted-foreground">
+                        结果将显示每个具体 CEX 热钱包的首次到账关系和分组。
+                      </p>
+                    </div>
+                  </div>
+                ) : (
+                  <Table className="min-w-[1400px]">
+                    <TableHeader className="sticky top-0 z-10 bg-card shadow-[0_1px_0_0_var(--border)]">
+                      <TableRow className="bg-secondary/45 hover:bg-secondary/45">
+                        <TableHead className="pl-4">序号</TableHead>
+                        <TableHead>地址</TableHead>
+                        <TableHead>到账时间</TableHead>
+                        <TableHead>到账时间分组</TableHead>
+                        <TableHead>组内地址数</TableHead>
+                        <TableHead>对应序号</TableHead>
+                        <TableHead>是否建议删除</TableHead>
+                        <TableHead>BNB 金额</TableHead>
+                        <TableHead>CEX 热钱包</TableHead>
+                        <TableHead>热钱包地址</TableHead>
+                        <TableHead className="pr-4">交易哈希</TableHead>
+                      </TableRow>
+                    </TableHeader>
+                    <TableBody>
+                      {visibleTableRows.map((row) => {
+                        if (row.kind === 'status') {
+                          return (
+                            <TableRow key={row.result.address}>
+                              <TableCell className="pl-4 text-sm font-medium">
+                                {row.resultIndex + 1}
+                              </TableCell>
+                              <TableCell
+                                className="font-mono text-xs"
+                                title={row.result.address}
+                              >
+                                {shortAddress(row.result.address)}
+                              </TableCell>
+                              <TableCell colSpan={9} className="pr-4">
+                                <StatusMessage result={row.result} />
+                              </TableCell>
+                            </TableRow>
+                          );
+                        }
+
+                        const id = relationId(
+                          row.result.address,
+                          row.funding.sourceAddress,
+                        );
+                        const groupDetails = arrivalGroupDetails.get(id);
+                        const suggested = removalSuggestionByAddress.has(
+                          row.result.address.toLowerCase(),
+                        );
+                        return (
+                          <TableRow key={id}>
+                            <TableCell className="pl-4 text-sm font-medium">
+                              {row.resultIndex + 1}-{row.fundingIndex + 1}
+                            </TableCell>
+                            <TableCell
+                              className="font-mono text-xs"
+                              title={row.result.address}
+                            >
+                              {shortAddress(row.result.address)}
+                            </TableCell>
+                            <TableCell>
+                              {formatTimestamp(row.funding.timestamp)}
+                            </TableCell>
+                            <TableCell>
+                              {loading ? (
+                                <Badge variant="outline">计算中</Badge>
+                              ) : groupDetails ? (
+                                <Badge className="bg-primary/15 text-primary">
+                                  组别 {groupDetails.groupNumber}
+                                </Badge>
+                              ) : (
+                                <span className="text-sm text-muted-foreground">
+                                  无
+                                </span>
+                              )}
+                            </TableCell>
+                            <TableCell>
+                              {loading || !groupDetails
+                                ? '无'
+                                : groupDetails.memberCount}
+                            </TableCell>
+                            <TableCell className="max-w-48 whitespace-normal text-xs leading-5">
+                              {loading || !groupDetails
+                                ? '无'
+                                : groupDetails.memberSequences.join('、')}
+                            </TableCell>
+                            <TableCell>
+                              {loading || !complete ? (
+                                <Badge variant="outline">待完整查询</Badge>
+                              ) : suggested ? (
+                                <Badge className="bg-red-100 text-red-800">
+                                  是
+                                </Badge>
+                              ) : (
+                                '否'
+                              )}
+                            </TableCell>
+                            <TableCell className="font-medium">
+                              {formatWei(row.funding.amountWei)}
+                            </TableCell>
+                            <TableCell>
+                              <Badge
+                                className="bg-primary/15 text-primary"
+                                title={row.funding.sourceAddress}
+                              >
+                                {row.funding.cex.label}
+                              </Badge>
+                            </TableCell>
+                            <TableCell
+                              className="font-mono text-xs"
+                              title={row.funding.sourceAddress}
+                            >
+                              {shortAddress(row.funding.sourceAddress)}
+                            </TableCell>
+                            <TableCell className="pr-4">
+                              <a
+                                href={`https://bscscan.com/tx/${row.funding.transactionHash}`}
+                                target="_blank"
+                                rel="noreferrer"
+                                className="inline-flex items-center gap-1 font-mono text-xs text-muted-foreground underline-offset-4 hover:text-foreground hover:underline"
+                                title={row.funding.transactionHash}
+                              >
+                                {shortAddress(row.funding.transactionHash)}
+                                <ArrowUpRight className="size-3" />
+                              </a>
+                            </TableCell>
+                          </TableRow>
+                        );
+                      })}
+                    </TableBody>
+                  </Table>
+                )}
+              </section>
+            </CardContent>
+          </Card>
+        </section>
+
+        <footer className="mt-12 border-t border-border pt-5 text-xs leading-5 text-muted-foreground">
+          每条结果代表“具体 CEX 热钱包 → 接收地址 →
+          BNB”的首次成功普通转账，不包含内部交易。同一交易所的不同热钱包分别计算、绝不合并；同一热钱包下按首次到账时间排序，相邻间隔不超过
+          20 分钟且连续至少 2 个地址才形成分组。组内超过 4
+          个地址时产生删除建议，优先选择能同时减少多个超限组的地址，直到所有组最多剩
+          4 个。CEX 标签采用精确地址匹配，未命中不代表一定不是交易所地址。
+        </footer>
+      </div>
+    </main>
+  );
+}
